@@ -1,14 +1,20 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod bencode_parser;
+use crate::bencode_parser::parser::Value;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn try_parse() {
+    let data = bencode_parser::parser::parse(b"d3:cow3:moo4:spam4:eggse").unwrap();
+    let v = data.first().unwrap();
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    if let Value::Dictionary(dict) = v {
+        let v = dict.get(b"cow" as &[u8]).unwrap();
+
+        if let Value::Bytes(data) = v {
+            assert_eq!(data, b"moo");
+        }
+
+        let v = dict.get(b"spam" as &[u8]).unwrap();
+        if let Value::Bytes(data) = v {
+            assert_eq!(data, b"eggs");
+        }
     }
 }
