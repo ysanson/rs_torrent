@@ -1,3 +1,4 @@
+/// Big thanks to https://github.com/edg-l/nom-bencode for this tutorial!!
 use nom::{
     IResult, Parser,
     branch::alt,
@@ -136,4 +137,211 @@ pub fn parse(source: &[u8]) -> Result<Vec<Value>, Err<BencodeError<&[u8]>>> {
     let _ = eof(source2)?;
 
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bencode_parser::{
+        errors::BencodeError,
+        parser::{Value, parse},
+    };
+    use assert_matches::assert_matches;
+
+    #[test]
+    fn test_integer() {
+        let (_, v) = Value::parse_integer(b"i3e").unwrap();
+        assert_matches!(v, Value::Integer(3));
+
+        let (_, v) = Value::parse_integer(b"i3e1:a").unwrap();
+        assert_matches!(v, Value::Integer(3));
+
+        let (_, v) = Value::parse_integer(b"i-3e").unwrap();
+        assert_matches!(v, Value::Integer(-3));
+
+        let (_, v) = Value::parse_integer(b"i333333e").unwrap();
+        assert_matches!(v, Value::Integer(333_333));
+
+        let v = Value::parse_integer(b"i-0e").unwrap_err();
+        assert_matches!(v, nom::Err::Failure(BencodeError::InvalidInteger(_)));
+
+        let v = Value::parse_integer(b"i00e").unwrap_err();
+        assert_matches!(v, nom::Err::Failure(BencodeError::InvalidInteger(_)));
+
+        let v = Value::parse_integer(b"i-00e").unwrap_err();
+        assert_matches!(v, nom::Err::Failure(BencodeError::InvalidInteger(_)));
+
+        let v = Value::parse_integer(b"i03e").unwrap_err();
+        assert_matches!(v, nom::Err::Failure(BencodeError::InvalidInteger(_)));
+
+        let v = Value::parse_integer(b"i0040e").unwrap_err();
+        assert_matches!(v, nom::Err::Failure(BencodeError::InvalidInteger(_)));
+
+        let v = Value::parse_integer(b"li3ee").unwrap_err();
+        assert_matches!(v, nom::Err::Error(BencodeError::Nom(..)));
+    }
+
+    #[test]
+    fn test_string() {
+        let (_, v) = Value::parse_bytes(b"4:abcd").unwrap();
+        assert_matches!(v, Value::Bytes(b"abcd"));
+
+        let (_, v) = Value::parse_bytes(b"1:a").unwrap();
+        assert_matches!(v, Value::Bytes(b"a"));
+
+        let (_, v) = Value::parse_bytes(b"1:rock").unwrap();
+        assert_matches!(v, Value::Bytes(b"r"));
+
+        let v = Value::parse_bytes(b"0:a").unwrap_err();
+        assert_matches!(v, nom::Err::Failure(BencodeError::InvalidBytesLength(_)));
+    }
+
+    #[test]
+    fn test_list() {
+        let (_, v) = Value::parse_list(b"l4:spam4:eggsi22eli1ei2eee").unwrap();
+        assert_matches!(v, Value::List(_));
+
+        if let Value::List(list) = v {
+            let mut it = list.iter();
+
+            let x = it.next().unwrap();
+            assert_matches!(*x, Value::Bytes(b"spam"));
+
+            let x = it.next().unwrap();
+            assert_matches!(*x, Value::Bytes(b"eggs"));
+
+            let x = it.next().unwrap();
+            assert_matches!(*x, Value::Integer(22));
+
+            let x = it.next().unwrap();
+            assert_matches!(*x, Value::List(_));
+
+            if let Value::List(list) = x {
+                let mut it = list.iter();
+
+                let x = it.next().unwrap();
+                assert_matches!(*x, Value::Integer(1));
+
+                let x = it.next().unwrap();
+                assert_matches!(*x, Value::Integer(2));
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_empty() {
+        let (_, v) = Value::parse_list(b"le").unwrap();
+        assert_matches!(v, Value::List(_));
+    }
+
+    #[test]
+    fn test_dict() {
+        let (_, v) = Value::parse_dict(b"d3:cow3:moo4:spam4:eggse").unwrap();
+        assert_matches!(v, Value::Dictionary(_));
+
+        if let Value::Dictionary(dict) = v {
+            let v = dict.get(b"cow".as_slice()).unwrap();
+            assert_matches!(*v, Value::Bytes(b"moo"));
+
+            let v = dict.get(b"spam".as_slice()).unwrap();
+            assert_matches!(*v, Value::Bytes(b"eggs"));
+        }
+
+        let (_, v) = Value::parse_dict(b"d4:spaml1:a1:bee").unwrap();
+        assert_matches!(v, Value::Dictionary(_));
+
+        if let Value::Dictionary(dict) = v {
+            let v = dict.get(b"spam".as_slice()).unwrap();
+            assert_matches!(*v, Value::List(_));
+        }
+    }
+
+    #[test]
+    fn test_parse() {
+        let data = parse(b"d3:cow3:moo4:spam4:eggse").unwrap();
+        let v = data.first().unwrap();
+        assert_matches!(v, Value::Dictionary(_));
+
+        if let Value::Dictionary(dict) = v {
+            let v = dict.get(b"cow".as_slice()).unwrap();
+            assert_matches!(*v, Value::Bytes(b"moo"));
+
+            let v = dict.get(b"spam".as_slice()).unwrap();
+            assert_matches!(*v, Value::Bytes(b"eggs"));
+        }
+
+        let (_, v) = Value::parse_dict(b"d4:spaml1:a1:bee").unwrap();
+        assert_matches!(v, Value::Dictionary(_));
+
+        if let Value::Dictionary(dict) = v {
+            let v = dict.get(b"spam".as_slice()).unwrap();
+            assert_matches!(*v, Value::List(_));
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_integer() {
+        let data = Value::parse_integer(b"123");
+        assert!(data.is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_bytes() {
+        let data = Value::parse_bytes(b"123");
+        assert!(data.is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_list() {
+        let data = Value::parse_list(b"123");
+        assert!(data.is_err());
+
+        let data = Value::parse_list(b"l123");
+        assert!(data.is_err());
+
+        let data = Value::parse_list(b"li1e");
+        assert!(data.is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_dict() {
+        let data = Value::parse_dict(b"123");
+        assert!(data.is_err());
+
+        let data = Value::parse_dict(b"d123");
+        assert!(data.is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_x() {
+        let data = parse(b"123");
+        assert!(data.is_err());
+    }
+
+    #[test]
+    fn test_parse_torrent() {
+        let data = parse(include_bytes!(
+            "../../test_data/debian-12.11.0-amd64-netinst.iso.torrent"
+        ))
+        .unwrap();
+        assert_eq!(data.len(), 1);
+
+        let v = data.first().unwrap();
+        assert_matches!(*v, Value::Dictionary(_));
+
+        if let Value::Dictionary(dict) = v {
+            let info = dict.get(b"info".as_slice()).unwrap();
+            assert_matches!(*info, Value::Dictionary(_));
+
+            let announce = dict.get(b"announce".as_slice()).unwrap();
+            assert_matches!(*announce, Value::Bytes(_));
+
+            if let Value::Bytes(announce) = *announce {
+                let announce = std::str::from_utf8(announce).unwrap();
+                assert_eq!(announce, "http://bttracker.debian.org:6969/announce");
+            }
+
+            let url_list = dict.get(b"url-list".as_slice()).unwrap();
+            assert_matches!(*url_list, Value::List(_));
+        }
+    }
 }
