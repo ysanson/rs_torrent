@@ -14,7 +14,11 @@ mod tests {
         let data = b"d3:cow3:moo4:spam4:eggse";
         let parsed = parse(data).unwrap();
 
-        if let Some(Value::Dictionary(dict)) = parsed.first() {
+        if let Some(Value::Dictionary {
+            entries: dict,
+            hash: _,
+        }) = parsed.first()
+        {
             if let Some(Value::Bytes(cow_value)) = dict.get(b"cow" as &[u8]) {
                 assert_eq!(cow_value, b"moo");
             }
@@ -30,7 +34,11 @@ mod tests {
         let data = b"d3:cow3:moo4:spam4:eggse";
         let parsed = parse_owned(data).unwrap();
 
-        if let Some(ValueOwned::Dictionary(dict)) = parsed.first() {
+        if let Some(ValueOwned::Dictionary {
+            entries: dict,
+            hash: _,
+        }) = parsed.first()
+        {
             if let Some(ValueOwned::Bytes(cow_value)) = dict.get(b"cow" as &[u8]) {
                 assert_eq!(cow_value, b"moo");
             }
