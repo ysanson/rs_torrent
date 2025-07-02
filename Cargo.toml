@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.5.40", features = ["derive"] }
 nom = "8.0.0"
+sha1 = "0.10.6"
 thiserror = "2.0.12"
 
 [dev-dependencies]
@@ -16,5 +17,5 @@ name = "torrent_usage"
 path = "examples/torrent_usage.rs"
 
 [[example]]
-name = "quick_start"
-path = "examples/quick_start.rs"
+name = "torrent_parser"
+path = "examples/torrent_parser.rs"

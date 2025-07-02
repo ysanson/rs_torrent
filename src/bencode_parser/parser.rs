@@ -8,6 +8,7 @@ use nom::{
     multi::{many_till, many0},
     sequence::{delimited, pair, preceded},
 };
+use sha1::{Digest, Sha1};
 use std::{collections::HashMap, fmt::Debug};
 
 pub use nom::Err;
@@ -20,7 +21,10 @@ pub enum Value<'a> {
     Bytes(&'a [u8]),
     Integer(i64),
     List(Vec<Self>),
-    Dictionary(HashMap<&'a [u8], Self>),
+    Dictionary {
+        entries: HashMap<&'a [u8], Self>,
+        hash: [u8; 20],
+    },
 }
 
 impl<'a> Value<'a> {
@@ -89,6 +93,7 @@ impl<'a> Value<'a> {
     }
 
     fn parse_dict(start_inp: &'a [u8]) -> BenResult<'a> {
+        let input = start_inp;
         let (inp, value) = preceded(
             char('d'),
             many_till(
@@ -115,9 +120,18 @@ impl<'a> Value<'a> {
             }
         });
 
-        let map = data.collect();
+        let entries: HashMap<&[u8], Value<'a>> = data.collect();
+        let parsed_len = input.len() - inp.len();
+        let raw_slice = &input[..parsed_len];
+        let hash: [u8; 20] = Sha1::digest(raw_slice).into();
 
-        Ok((inp, Value::Dictionary(map)))
+        Ok((
+            inp,
+            Value::Dictionary {
+                entries: entries,
+                hash: hash,
+            },
+        ))
     }
 }
 
@@ -126,7 +140,10 @@ pub enum ValueOwned {
     Bytes(Vec<u8>),
     Integer(i64),
     List(Vec<ValueOwned>),
-    Dictionary(HashMap<Vec<u8>, ValueOwned>),
+    Dictionary {
+        entries: HashMap<Vec<u8>, Self>,
+        hash: [u8; 20],
+    },
 }
 
 impl<'a> From<Value<'a>> for ValueOwned {
@@ -135,11 +152,16 @@ impl<'a> From<Value<'a>> for ValueOwned {
             Value::Bytes(b) => ValueOwned::Bytes(b.to_vec()),
             Value::Integer(i) => ValueOwned::Integer(i),
             Value::List(lst) => ValueOwned::List(lst.into_iter().map(ValueOwned::from).collect()),
-            Value::Dictionary(dict) => ValueOwned::Dictionary(
-                dict.into_iter()
+            Value::Dictionary { entries, hash } => {
+                let owned_entries = entries
+                    .into_iter()
                     .map(|(k, v)| (k.to_vec(), ValueOwned::from(v)))
-                    .collect(),
-            ),
+                    .collect();
+                ValueOwned::Dictionary {
+                    entries: owned_entries,
+                    hash,
+                }
+            }
         }
     }
 }
@@ -265,21 +287,33 @@ mod tests {
     #[test]
     fn test_dict() {
         let (_, v) = Value::parse_dict(b"d3:cow3:moo4:spam4:eggse").unwrap();
-        assert_matches!(v, Value::Dictionary(_));
+        assert_matches!(
+            v,
+            Value::Dictionary {
+                entries: _,
+                hash: _
+            }
+        );
 
-        if let Value::Dictionary(dict) = v {
-            let v = dict.get(b"cow".as_slice()).unwrap();
+        if let Value::Dictionary { entries, hash: _ } = v {
+            let v = entries.get(b"cow".as_slice()).unwrap();
             assert_matches!(*v, Value::Bytes(b"moo"));
 
-            let v = dict.get(b"spam".as_slice()).unwrap();
+            let v = entries.get(b"spam".as_slice()).unwrap();
             assert_matches!(*v, Value::Bytes(b"eggs"));
         }
 
         let (_, v) = Value::parse_dict(b"d4:spaml1:a1:bee").unwrap();
-        assert_matches!(v, Value::Dictionary(_));
+        assert_matches!(
+            v,
+            Value::Dictionary {
+                entries: _,
+                hash: _
+            }
+        );
 
-        if let Value::Dictionary(dict) = v {
-            let v = dict.get(b"spam".as_slice()).unwrap();
+        if let Value::Dictionary { entries, hash: _ } = v {
+            let v = entries.get(b"spam".as_slice()).unwrap();
             assert_matches!(*v, Value::List(_));
         }
     }
@@ -288,9 +322,19 @@ mod tests {
     fn test_parse() {
         let data = parse(b"d3:cow3:moo4:spam4:eggse").unwrap();
         let v = data.first().unwrap();
-        assert_matches!(v, Value::Dictionary(_));
+        assert_matches!(
+            v,
+            Value::Dictionary {
+                entries: _,
+                hash: _
+            }
+        );
 
-        if let Value::Dictionary(dict) = v {
+        if let Value::Dictionary {
+            entries: dict,
+            hash: _,
+        } = v
+        {
             let v = dict.get(b"cow".as_slice()).unwrap();
             assert_matches!(*v, Value::Bytes(b"moo"));
 
@@ -299,9 +343,19 @@ mod tests {
         }
 
         let (_, v) = Value::parse_dict(b"d4:spaml1:a1:bee").unwrap();
-        assert_matches!(v, Value::Dictionary(_));
+        assert_matches!(
+            v,
+            Value::Dictionary {
+                entries: _,
+                hash: _
+            }
+        );
 
-        if let Value::Dictionary(dict) = v {
+        if let Value::Dictionary {
+            entries: dict,
+            hash: _,
+        } = v
+        {
             let v = dict.get(b"spam".as_slice()).unwrap();
             assert_matches!(*v, Value::List(_));
         }
@@ -355,11 +409,27 @@ mod tests {
         assert_eq!(data.len(), 1);
 
         let v = data.first().unwrap();
-        assert_matches!(*v, Value::Dictionary(_));
+        assert_matches!(
+            *v,
+            Value::Dictionary {
+                entries: _,
+                hash: _
+            }
+        );
 
-        if let Value::Dictionary(dict) = v {
+        if let Value::Dictionary {
+            entries: dict,
+            hash: _,
+        } = v
+        {
             let info = dict.get(b"info".as_slice()).unwrap();
-            assert_matches!(*info, Value::Dictionary(_));
+            assert_matches!(
+                *info,
+                Value::Dictionary {
+                    entries: _,
+                    hash: _
+                }
+            );
 
             let announce = dict.get(b"announce".as_slice()).unwrap();
             assert_matches!(*announce, Value::Bytes(_));

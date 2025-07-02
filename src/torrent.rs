@@ -11,7 +11,7 @@ pub struct Torrent {
     pub total_size: u32,
     pub name: String,
     pub pieces: Vec<[u8; 20]>,
-    pub infohash: String,
+    pub infohash: [u8; 20],
 }
 
 pub fn get_string(
@@ -34,10 +34,6 @@ pub fn get_u32(
     }
 }
 
-pub fn compute_info_hash(_dict: &HashMap<Vec<u8>, ValueOwned>) -> String {
-    return "".to_string();
-}
-
 /// Parse torrent from file path
 pub fn parse_torrent_file(file_path: &str) -> Result<Torrent, Box<dyn std::error::Error>> {
     let data = fs::read(file_path)?;
@@ -50,13 +46,16 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
     let top_level = parsed.first().ok_or("Empty torrent file")?;
 
     let dict = match top_level {
-        ValueOwned::Dictionary(d) => d,
+        ValueOwned::Dictionary {
+            entries: d,
+            hash: _,
+        } => d,
         _ => return Err("Invalid torrent file: expected top-level dictionary".into()),
     };
 
     let announce = get_string(dict, b"announce")?;
-    let info = match dict.get(b"info" as &[u8]).ok_or("Missing 'info' field")? {
-        ValueOwned::Dictionary(d) => d,
+    let (info, infohash) = match dict.get(b"info" as &[u8]).ok_or("Missing 'info' field")? {
+        ValueOwned::Dictionary { entries, hash } => (entries, hash),
         _ => return Err("Invalid 'info' field".into()),
     };
 
@@ -82,7 +81,11 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
         length as u32
     } else if let Some(ValueOwned::List(files)) = info.get(b"files" as &[u8]) {
         files.iter().fold(0u32, |acc, file| {
-            if let ValueOwned::Dictionary(file_dict) = file {
+            if let ValueOwned::Dictionary {
+                entries: file_dict,
+                hash: _,
+            } = file
+            {
                 if let Ok(length) = get_u32(file_dict, b"length") {
                     acc + length
                 } else {
@@ -96,7 +99,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
         return Err("Cannot determine torrent size".into());
     };
 
-    let infohash = compute_info_hash(info);
+    // let infohash = compute_info_hash(info);
 
     Ok(Torrent {
         announce,
@@ -106,6 +109,6 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
         total_size,
         name,
         pieces,
-        infohash,
+        infohash: *infohash,
     })
 }
