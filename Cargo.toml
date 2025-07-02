@@ -10,3 +10,11 @@ thiserror = "2.0.12"
 
 [dev-dependencies]
 assert_matches = "1.5.0"
+
+[[example]]
+name = "torrent_usage"
+path = "examples/torrent_usage.rs"
+
+[[example]]
+name = "quick_start"
+path = "examples/quick_start.rs"

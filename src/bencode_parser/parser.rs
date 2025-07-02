@@ -121,6 +121,29 @@ impl<'a> Value<'a> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum ValueOwned {
+    Bytes(Vec<u8>),
+    Integer(i64),
+    List(Vec<ValueOwned>),
+    Dictionary(HashMap<Vec<u8>, ValueOwned>),
+}
+
+impl<'a> From<Value<'a>> for ValueOwned {
+    fn from(v: Value<'a>) -> Self {
+        match v {
+            Value::Bytes(b) => ValueOwned::Bytes(b.to_vec()),
+            Value::Integer(i) => ValueOwned::Integer(i),
+            Value::List(lst) => ValueOwned::List(lst.into_iter().map(ValueOwned::from).collect()),
+            Value::Dictionary(dict) => ValueOwned::Dictionary(
+                dict.into_iter()
+                    .map(|(k, v)| (k.to_vec(), ValueOwned::from(v)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
 /// Parses the provided bencode `source`.
 ///
 /// # Errors
@@ -137,6 +160,12 @@ pub fn parse(source: &[u8]) -> Result<Vec<Value>, Err<BencodeError<&[u8]>>> {
     let _ = eof(source2)?;
 
     Ok(items)
+}
+
+pub fn parse_owned(source: &[u8]) -> Result<Vec<ValueOwned>, Err<BencodeError<Vec<u8>>>> {
+    let items = parse(source).map_err(|e| e.map(|err| err.to_owned()))?;
+
+    Ok(items.into_iter().map(ValueOwned::from).collect())
 }
 
 #[cfg(test)]

@@ -35,3 +35,18 @@ impl<I> From<BencodeError<I>> for nom::Err<BencodeError<I>> {
         }
     }
 }
+
+impl BencodeError<&[u8]> {
+    pub fn to_owned(self) -> BencodeError<Vec<u8>> {
+        match self {
+            BencodeError::Nom(input, kind) => BencodeError::Nom(input.to_vec(), kind),
+            BencodeError::InvalidInteger(input) => BencodeError::InvalidInteger(input.to_vec()),
+            BencodeError::InvalidBytesLength(input) => {
+                BencodeError::InvalidBytesLength(input.to_vec())
+            }
+            BencodeError::ParseIntError(input, err) => {
+                BencodeError::ParseIntError(input.to_vec(), err)
+            }
+        }
+    }
+}

@@ -1,61 +1,43 @@
 pub mod bencode_parser;
-use std::fs;
+pub mod torrent;
 
-use crate::bencode_parser::{parser::Value, parser::parse};
+// Re-export commonly used types and functions for easier access
+pub use bencode_parser::parser::{Value, ValueOwned, parse, parse_owned};
+pub use torrent::{Torrent, parse_torrent_bytes, parse_torrent_file};
 
-struct Torrent {
-    announce: String,
-    creation_date: u32,
-    length: u32,
-    piece_length: u32,
-    name: String,
-    pieces: Vec<[u8; 20]>,
-    infohash: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn extract_torrent(file_path: String) -> Result<Torrent, Box<dyn std::error::Error>> {
-    let contents = fs::read(file_path)?.as_slice();
-    let binding = parse(contents)?;
-    let parsed = binding.first().unwrap();
+    #[test]
+    fn test_parse_simple_bencode() {
+        let data = b"d3:cow3:moo4:spam4:eggse";
+        let parsed = parse(data).unwrap();
 
-    if let Value::Dictionary(dict) = parsed {
-        // Extract data by copying strings instead of borrowing
-        let announce = if let Some(Value::Bytes(data)) = dict.get(b"announce" as &[u8]) {
-            String::from_utf8(data.to_vec()).unwrap_or_default()
-        } else {
-            String::new()
-        };
+        if let Some(Value::Dictionary(dict)) = parsed.first() {
+            if let Some(Value::Bytes(cow_value)) = dict.get(b"cow" as &[u8]) {
+                assert_eq!(cow_value, b"moo");
+            }
 
-        // Extract other fields similarly...
-        let torrent = Torrent {
-            announce,
-            creation_date: 0,
-            length: 0,
-            piece_length: 0,
-            name: "".to_string(),
-            pieces: Vec::new(),
-            infohash: "".to_string(),
-        };
-        Ok(torrent)
-    } else {
-        Err("Invalid torrent file format".into())
-    }
-}
-
-fn try_parse() {
-    let data = bencode_parser::parser::parse(b"d3:cow3:moo4:spam4:eggse").unwrap();
-    let v = data.first().unwrap();
-
-    if let Value::Dictionary(dict) = v {
-        let v = dict.get(b"cow" as &[u8]).unwrap();
-
-        if let Value::Bytes(data) = v {
-            assert_eq!(data, b"moo");
+            if let Some(Value::Bytes(spam_value)) = dict.get(b"spam" as &[u8]) {
+                assert_eq!(spam_value, b"eggs");
+            }
         }
+    }
 
-        let v = dict.get(b"spam" as &[u8]).unwrap();
-        if let Value::Bytes(data) = v {
-            assert_eq!(data, b"eggs");
+    #[test]
+    fn test_parse_owned() {
+        let data = b"d3:cow3:moo4:spam4:eggse";
+        let parsed = parse_owned(data).unwrap();
+
+        if let Some(ValueOwned::Dictionary(dict)) = parsed.first() {
+            if let Some(ValueOwned::Bytes(cow_value)) = dict.get(b"cow" as &[u8]) {
+                assert_eq!(cow_value, b"moo");
+            }
+
+            if let Some(ValueOwned::Bytes(spam_value)) = dict.get(b"spam" as &[u8]) {
+                assert_eq!(spam_value, b"eggs");
+            }
         }
     }
 }
