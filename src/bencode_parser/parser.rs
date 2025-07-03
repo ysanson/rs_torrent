@@ -184,6 +184,11 @@ pub fn parse(source: &[u8]) -> Result<Vec<Value>, Err<BencodeError<&[u8]>>> {
     Ok(items)
 }
 
+/// Parses the bencode source, and returns an owned version of the Value result.
+///
+/// # Errors
+/// Returns `Err` if there was an error parsing the source. The error as well as the result are
+/// owned versions.
 pub fn parse_owned(source: &[u8]) -> Result<Vec<ValueOwned>, Err<BencodeError<Vec<u8>>>> {
     let items = parse(source).map_err(|e| e.map(|err| err.to_owned()))?;
 

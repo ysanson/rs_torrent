@@ -46,10 +46,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
     let top_level = parsed.first().ok_or("Empty torrent file")?;
 
     let dict = match top_level {
-        ValueOwned::Dictionary {
-            entries: d,
-            hash: _,
-        } => d,
+        ValueOwned::Dictionary { entries, hash: _ } => entries,
         _ => return Err("Invalid torrent file: expected top-level dictionary".into()),
     };
 
@@ -81,12 +78,8 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
         length as u32
     } else if let Some(ValueOwned::List(files)) = info.get(b"files" as &[u8]) {
         files.iter().fold(0u32, |acc, file| {
-            if let ValueOwned::Dictionary {
-                entries: file_dict,
-                hash: _,
-            } = file
-            {
-                if let Ok(length) = get_u32(file_dict, b"length") {
+            if let ValueOwned::Dictionary { entries, hash: _ } = file {
+                if let Ok(length) = get_u32(entries, b"length") {
                     acc + length
                 } else {
                     acc
@@ -98,8 +91,6 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
     } else {
         return Err("Cannot determine torrent size".into());
     };
-
-    // let infohash = compute_info_hash(info);
 
     Ok(Torrent {
         announce,
