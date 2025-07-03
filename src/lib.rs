@@ -5,6 +5,7 @@ pub mod tracker;
 // Re-export commonly used types and functions for easier access
 pub use bencode_parser::parser::{Value, ValueOwned, parse, parse_owned};
 pub use torrent::{Torrent, parse_torrent_bytes, parse_torrent_file};
+pub use tracker::announce_to_tracker;
 
 #[cfg(test)]
 mod tests {
