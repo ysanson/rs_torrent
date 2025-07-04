@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, net::IpAddr};
 
 use crate::{Torrent, ValueOwned, parse_owned};
 use once_cell::sync::Lazy;
@@ -14,6 +14,11 @@ const HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .build()
         .expect("Failed to build HTTP client")
 });
+
+pub struct Peer {
+    pub ip_addr: IpAddr,
+    pub port: u16,
+}
 
 fn build_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError> {
     let mut url = Url::parse(&torrent.announce)?;
@@ -41,6 +46,10 @@ async fn contact_tracker(tracker_url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(bytes.to_vec())
 }
 
+fn extract_peers(bytes: &Vec<u8>) -> Option<Vec<Peer>> {
+    return None;
+}
+
 pub async fn announce_to_tracker(torrent: &Torrent, port: u16) -> Result<(), Box<dyn Error>> {
     let url = build_tracker_url(torrent, port)?;
     let response_bytes = contact_tracker(&url).await?;
@@ -55,10 +64,10 @@ pub async fn announce_to_tracker(torrent: &Torrent, port: u16) -> Result<(), Box
         println!("Tracker reannounce interval: {interval} seconds");
     }
 
-    if let Some(ValueOwned::Bytes(peers)) = dict.get(b"peers" as &[u8]) {
-        println!("Got {} bytes of peer info", peers.len());
-        // decode peers here
-    }
+    let peers = match dict.get(b"peers" as &[u8]) {
+        Some(ValueOwned::Bytes(peers)) => extract_peers(peers),
+        _ => return Err("Peers is not a dict".into()),
+    };
 
     Ok(())
 }
