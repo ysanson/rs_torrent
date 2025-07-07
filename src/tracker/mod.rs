@@ -1,4 +1,6 @@
-use std::{error::Error, net::IpAddr};
+pub mod handshake;
+pub mod message;
+use std::{error::Error, net::Ipv4Addr};
 
 use crate::{Torrent, ValueOwned, parse_owned};
 use once_cell::sync::Lazy;
@@ -15,8 +17,12 @@ const HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .expect("Failed to build HTTP client")
 });
 
+const PSTR: &str = "BitTorrent protocol";
+const PSTR_LEN: u8 = PSTR.len() as u8; // always 19
+
+#[derive(Debug)]
 pub struct Peer {
-    pub ip_addr: IpAddr,
+    pub ip_addr: Ipv4Addr,
     pub port: u16,
 }
 
@@ -46,11 +52,27 @@ async fn contact_tracker(tracker_url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(bytes.to_vec())
 }
 
-fn extract_peers(bytes: &Vec<u8>) -> Option<Vec<Peer>> {
-    return None;
+fn extract_peers(bytes: &[u8]) -> Option<Vec<Peer>> {
+    let peer_size: usize = 6;
+    if bytes.len() % peer_size != 0 {
+        return None;
+    }
+    let peers = bytes
+        .chunks_exact(6)
+        .map(|chunk| {
+            let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+            let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+            Peer { ip_addr: ip, port }
+        })
+        .collect();
+
+    Some(peers)
 }
 
-pub async fn announce_to_tracker(torrent: &Torrent, port: u16) -> Result<(), Box<dyn Error>> {
+pub async fn announce_to_tracker(
+    torrent: &Torrent,
+    port: u16,
+) -> Result<(i64, Vec<Peer>), Box<dyn Error>> {
     let url = build_tracker_url(torrent, port)?;
     let response_bytes = contact_tracker(&url).await?;
 
@@ -60,14 +82,19 @@ pub async fn announce_to_tracker(torrent: &Torrent, port: u16) -> Result<(), Box
         _ => return Err("Tracker response not a dict".into()),
     };
 
-    if let Some(ValueOwned::Integer(interval)) = dict.get(b"interval" as &[u8]) {
-        println!("Tracker reannounce interval: {interval} seconds");
-    }
+    let interval = match dict.get(b"interval" as &[u8]) {
+        Some(ValueOwned::Integer(interval)) => interval,
+        _ => return Err("Failed to extract interval".into()),
+    };
 
     let peers = match dict.get(b"peers" as &[u8]) {
         Some(ValueOwned::Bytes(peers)) => extract_peers(peers),
         _ => return Err("Peers is not a dict".into()),
     };
 
-    Ok(())
+    if peers.is_none() {
+        return Err("Peers cannot be extracted".into());
+    }
+
+    Ok((*interval, peers.unwrap()))
 }
