@@ -1,4 +1,4 @@
-use crate::tracker::{PSTR, PSTR_LEN};
+use crate::peer::{PSTR, PSTR_LEN};
 
 #[derive(Debug)]
 pub struct Handshake {
@@ -40,7 +40,7 @@ impl Handshake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracker::{PSTR, PSTR_LEN};
+    use crate::peer::{PSTR, PSTR_LEN};
 
     #[test]
     fn test_handshake_serialize() {
