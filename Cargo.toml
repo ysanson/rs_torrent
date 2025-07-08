@@ -10,7 +10,14 @@ percent-encoding = "2.3.1"
 sha1 = "0.10.6"
 thiserror = "2.0.12"
 url = "2.5.4"
-reqwest = { version = "0.11", features = ["json", "gzip", "brotli", "deflate", "stream", "rustls-tls"] }
+reqwest = { version = "0.11", features = [
+    "json",
+    "gzip",
+    "brotli",
+    "deflate",
+    "stream",
+    "rustls-tls",
+] }
 tokio = { version = "1", features = ["full"] }
 once_cell = "1.21.3"
 
@@ -24,3 +31,7 @@ path = "examples/torrent_usage.rs"
 [[example]]
 name = "torrent_parser"
 path = "examples/torrent_parser.rs"
+
+[[example]]
+name = "torrent_client"
+path = "examples/download_client.rs"
