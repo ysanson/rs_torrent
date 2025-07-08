@@ -1,7 +1,8 @@
 use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
 use crate::peer::message::{Bitfield, Message, MessageId};
-use crate::peer::state::DownloadState;
+use crate::peer::state::{BlockInfo, DownloadState};
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
+pub const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -150,8 +151,8 @@ impl BitTorrentClient {
                 }
             }
 
-            // Try to download pieces if we can
-            if let Err(e) = self.try_download_pieces(&mut stream, &addr).await {
+            // Try to download blocks if we can
+            if let Err(e) = self.try_download_blocks(&mut stream, &addr).await {
                 eprintln!("Error downloading from peer {}: {}", addr, e);
                 break;
             }
@@ -160,6 +161,7 @@ impl BitTorrentClient {
             {
                 let download_state = self.download_state.lock().await;
                 if download_state.is_complete() {
+                    println!("Download complete!");
                     break;
                 }
             }
@@ -316,24 +318,43 @@ impl BitTorrentClient {
             addr
         );
 
-        // For simplicity, we assume each piece is received as a single block
-        // In a real implementation, you'd need to handle multiple blocks per piece
-        if block_offset == 0 && block_data.len() > 0 {
+        // Create block info for this received block
+        let block_info = BlockInfo {
+            piece_index,
+            offset: block_offset,
+            length: block_data.len(),
+        };
+
+        // Store the block and check if piece is complete
+        let piece_complete = {
             let mut download_state = self.download_state.lock().await;
-            download_state.complete_piece(piece_index, block_data.to_vec());
+            download_state.complete_block(block_info, block_data.to_vec())
+        };
+
+        if piece_complete {
+            let download_state = self.download_state.lock().await;
             println!(
                 "Completed piece {} ({}/{})",
                 piece_index,
                 download_state.progress(),
                 download_state.total_pieces
             );
+        } else {
+            let download_state = self.download_state.lock().await;
+            let piece_progress = download_state.piece_progress(piece_index);
+            println!(
+                "Piece {} progress: {:.1}% ({} blocks completed)",
+                piece_index,
+                piece_progress * 100.0,
+                download_state.completed_blocks()
+            );
         }
 
         Ok(())
     }
 
-    /// Try to download pieces from a peer
-    async fn try_download_pieces(
+    /// Try to download blocks from a peer
+    async fn try_download_blocks(
         &self,
         stream: &mut TcpStream,
         addr: &SocketAddr,
@@ -350,8 +371,8 @@ impl BitTorrentClient {
             return Ok(());
         }
 
-        // Find a piece to download
-        let piece_to_download = {
+        // Find a block to download
+        let block_to_download = {
             let download_state = self.download_state.lock().await;
             let connections = self.connections.lock().await;
 
@@ -362,7 +383,7 @@ impl BitTorrentClient {
                         .map(|i| bitfield.has_piece(i))
                         .collect();
 
-                    download_state.pick_piece(&peer_bitfield)
+                    download_state.pick_block(&peer_bitfield)
                 } else {
                     None
                 }
@@ -371,21 +392,46 @@ impl BitTorrentClient {
             }
         };
 
-        if let Some(piece_index) = piece_to_download {
+        if let Some(block_info) = block_to_download {
             // Mark as requested
             {
                 let mut download_state = self.download_state.lock().await;
-                download_state.mark_requested(piece_index);
+                download_state.mark_block_requested(block_info.clone());
             }
 
-            // Request the piece
-            self.request_piece(stream, piece_index).await?;
+            // Request the block
+            self.request_block(stream, block_info).await?;
         }
 
         Ok(())
     }
 
-    /// Request a piece from a peer
+    /// Request a block from a peer
+    async fn request_block(
+        &self,
+        stream: &mut TcpStream,
+        block_info: BlockInfo,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let request_msg = Message {
+            kind: MessageId::Request,
+            payload: {
+                let mut payload = Vec::new();
+                payload.extend_from_slice(&(block_info.piece_index as u32).to_be_bytes());
+                payload.extend_from_slice(&(block_info.offset as u32).to_be_bytes());
+                payload.extend_from_slice(&(block_info.length as u32).to_be_bytes());
+                payload
+            },
+        };
+
+        stream.write_all(&request_msg.serialize()).await?;
+        println!(
+            "Requested block: piece {}, offset {}, length {} from peer",
+            block_info.piece_index, block_info.offset, block_info.length
+        );
+        Ok(())
+    }
+
+    /// Request a piece from a peer (legacy method - now requests all blocks)
     async fn request_piece(
         &self,
         stream: &mut TcpStream,
@@ -396,21 +442,28 @@ impl BitTorrentClient {
             download_state.piece_length as usize
         };
 
-        // For simplicity, request the entire piece as one block
-        // In a real implementation, you'd split into 16KB blocks
-        let request_msg = Message {
-            kind: MessageId::Request,
-            payload: {
-                let mut payload = Vec::new();
-                payload.extend_from_slice(&(piece_index as u32).to_be_bytes());
-                payload.extend_from_slice(&0u32.to_be_bytes()); // offset
-                payload.extend_from_slice(&(piece_length as u32).to_be_bytes());
-                payload
-            },
-        };
+        // Request all blocks in the piece
+        let mut offset = 0;
+        while offset < piece_length {
+            let block_length = (piece_length - offset).min(PIECE_BLOCK_SIZE);
+            let block_info = BlockInfo {
+                piece_index,
+                offset,
+                length: block_length,
+            };
 
-        stream.write_all(&request_msg.serialize()).await?;
-        println!("Requested piece {} from peer", piece_index);
+            // Mark as requested
+            {
+                let mut download_state = self.download_state.lock().await;
+                download_state.mark_block_requested(block_info.clone());
+            }
+
+            // Request the block
+            self.request_block(stream, block_info).await?;
+
+            offset += block_length;
+        }
+
         Ok(())
     }
 
@@ -440,6 +493,15 @@ impl BitTorrentClient {
     pub async fn get_progress(&self) -> (usize, usize) {
         let download_state = self.download_state.lock().await;
         (download_state.progress(), download_state.total_pieces)
+    }
+
+    /// Get detailed block-level progress
+    pub async fn get_block_progress(&self) -> (usize, usize) {
+        let download_state = self.download_state.lock().await;
+        (
+            download_state.completed_blocks(),
+            download_state.total_blocks(),
+        )
     }
 
     /// Check if download is complete

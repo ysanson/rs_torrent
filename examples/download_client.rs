@@ -1,10 +1,10 @@
 //! BitTorrent Client Example
 //!
 //! This example demonstrates how to create a BitTorrent client that can download
-//! pieces from peers using the handshake, message, and state management components.
+//! pieces from peers using block-based downloading with 16KB blocks.
 
 use rs_torrent::peer::Peer;
-use rs_torrent::peer::client::BitTorrentClient;
+use rs_torrent::peer::client::{BitTorrentClient, PIECE_BLOCK_SIZE};
 use rs_torrent::peer::state::DownloadState;
 use rs_torrent::torrent::parse_torrent_file;
 use std::net::Ipv4Addr;
@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Torrent loaded: {}", torrent.name);
     println!("Total pieces: {}", torrent.pieces.len());
     println!("Piece length: {} bytes", torrent.piece_length);
+    println!("Block size: {} bytes", PIECE_BLOCK_SIZE);
     println!("Total size: {} bytes\n", torrent.total_size);
 
     // Step 2: Create download state
@@ -51,12 +52,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 6: Monitor progress
     loop {
-        let (downloaded, total) = client.get_progress().await;
-        let progress = (downloaded as f64 / total as f64) * 100.0;
+        let (downloaded_pieces, total_pieces) = client.get_progress().await;
+        let (downloaded_blocks, total_blocks) = client.get_block_progress().await;
+
+        let piece_progress = (downloaded_pieces as f64 / total_pieces as f64) * 100.0;
+        let block_progress = (downloaded_blocks as f64 / total_blocks as f64) * 100.0;
 
         println!(
-            "Progress: {}/{} pieces ({:.1}%)",
-            downloaded, total, progress
+            "Progress: {}/{} pieces ({:.1}%) | {}/{} blocks ({:.1}%)",
+            downloaded_pieces,
+            total_pieces,
+            piece_progress,
+            downloaded_blocks,
+            total_blocks,
+            block_progress
         );
 
         if client.is_complete().await {
@@ -147,27 +156,34 @@ async fn download_from_torrent_file(file_path: &str) -> Result<(), Box<dyn std::
 }
 
 /*
-=== HOW TO BUILD A BITTORRENT CLIENT STEP BY STEP ===
+=== HOW TO BUILD A BITTORRENT CLIENT WITH BLOCK-BASED DOWNLOADING ===
 
 1. **Understanding the Components**:
    - `Handshake`: Establishes connection with peer using BitTorrent protocol
    - `Message`: Handles peer communication (choke, unchoke, interested, have, bitfield, request, piece)
-   - `DownloadState`: Manages which pieces we have and need
+   - `DownloadState`: Manages which pieces and blocks we have and need
    - `BitTorrentClient`: Orchestrates the entire download process
+   - `BlockInfo`: Represents a 16KB block within a piece
 
 2. **Connection Flow**:
    ```
-   Connect to Peer → Handshake → Exchange Bitfields → Request Pieces → Download Data
+   Connect to Peer → Handshake → Exchange Bitfields → Request Blocks → Download Data
    ```
 
-3. **Message Exchange Protocol**:
+3. **Block-Based Downloading**:
+   - Each piece is split into 16KB blocks (PIECE_BLOCK_SIZE)
+   - Blocks are downloaded independently and can be pipelined
+   - Piece is complete when all blocks are received
+   - More efficient than downloading entire pieces at once
+
+4. **Message Exchange Protocol**:
    - Send "interested" to let peer know we want data
    - Wait for "unchoke" message from peer
-   - Send "request" messages for specific pieces
-   - Receive "piece" messages with actual data
+   - Send "request" messages for specific blocks (piece_index, offset, length)
+   - Receive "piece" messages with actual block data
    - Handle "have" messages when peer gets new pieces
 
-4. **Key Implementation Steps**:
+5. **Key Implementation Steps**:
 
    a) **Handshake Phase**:
       - Create handshake with torrent's infohash and your peer_id
@@ -179,43 +195,50 @@ async fn download_from_torrent_file(file_path: &str) -> Result<(), Box<dyn std::
       - Handle different message types appropriately
       - Update peer state (choking, interested, bitfield)
 
-   c) **Piece Management**:
-      - Use DownloadState to track which pieces we need
-      - Request pieces from peers that have them and aren't choking us
-      - Handle piece messages and store downloaded data
+   c) **Block Management**:
+      - Use DownloadState to track which blocks we need
+      - Request blocks from peers that have them and aren't choking us
+      - Handle piece messages and store downloaded block data
+      - Combine blocks when all blocks of a piece are complete
 
    d) **Concurrency**:
       - Use async/await for non-blocking I/O
       - Spawn separate tasks for each peer connection
       - Use Arc<Mutex<>> for shared state between tasks
+      - Pipeline multiple block requests to same peer
 
-5. **Error Handling**:
+6. **Block-Level Progress Tracking**:
+   - Track individual block completion
+   - Show both piece-level and block-level progress
+   - Handle partial piece downloads efficiently
+
+7. **Error Handling**:
    - Handle connection timeouts
    - Validate message formats
    - Deal with peers that disconnect
-   - Retry failed downloads
+   - Retry failed block downloads
 
-6. **Optimization Opportunities**:
-   - Pipeline multiple requests to same peer
-   - Split large pieces into smaller blocks (16KB)
-   - Implement endgame mode for final pieces
+8. **Optimization Opportunities**:
+   - Pipeline multiple block requests to same peer
+   - Implement endgame mode for final blocks
    - Add piece verification with SHA1 hashes
+   - Smart block selection algorithms
    - Implement tit-for-tat strategy for uploading
 
-7. **Real-world Considerations**:
+9. **Real-world Considerations**:
    - Rate limiting to avoid overwhelming peers
    - Proper peer discovery via DHT
    - Support for multiple trackers
    - Handling partial files and resume capability
    - Implementing the full BitTorrent protocol extensions
 
-8. **Testing**:
-   - Start with simple test peers
-   - Use small torrent files initially
-   - Monitor network traffic and debug messages
-   - Test with different peer behaviors
+10. **Testing**:
+    - Start with simple test peers
+    - Use small torrent files initially
+    - Monitor network traffic and debug messages
+    - Test with different peer behaviors
+    - Verify block assembly into complete pieces
 
-This example provides a foundation that you can extend with additional features
-like multi-tracker support, DHT peer discovery, piece verification, and more
-sophisticated peer management strategies.
+This block-based approach provides much better performance and more granular
+progress tracking compared to downloading entire pieces at once.
 */
