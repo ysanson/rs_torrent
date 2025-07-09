@@ -1,5 +1,7 @@
 pub mod bencode_parser;
+pub mod peer;
 pub mod torrent;
+pub mod tracker;
 
 // Re-export commonly used types and functions for easier access
 pub use bencode_parser::parser::{Value, ValueOwned, parse, parse_owned};

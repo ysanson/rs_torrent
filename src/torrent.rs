@@ -14,7 +14,7 @@ pub struct Torrent {
     pub infohash: [u8; 20],
 }
 
-pub fn get_string(
+fn get_string(
     dict: &HashMap<Vec<u8>, ValueOwned>,
     key: &[u8],
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -24,7 +24,7 @@ pub fn get_string(
     }
 }
 
-pub fn get_u32(
+fn get_u32(
     dict: &HashMap<Vec<u8>, ValueOwned>,
     key: &[u8],
 ) -> Result<u32, Box<dyn std::error::Error>> {
