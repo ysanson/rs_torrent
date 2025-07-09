@@ -24,8 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Total size: {} bytes\n", torrent.total_size);
 
     // Step 2: Create download state
-    let download_state =
-        DownloadState::new(torrent.pieces.len(), torrent.piece_length, torrent.infohash);
+    let download_state = DownloadState::new(
+        torrent.pieces.len(),
+        torrent.piece_length,
+        torrent.infohash,
+        torrent.pieces,
+        torrent.total_size as u64,
+    );
 
     // Step 3: Create client with a unique peer ID
     let peer_id = generate_peer_id();
@@ -138,8 +143,13 @@ async fn download_from_torrent_file(file_path: &str) -> Result<(), Box<dyn std::
     let torrent = parse_torrent_file(file_path)?;
 
     // Step 2: Create download state
-    let download_state =
-        DownloadState::new(torrent.pieces.len(), torrent.piece_length, torrent.infohash);
+    let download_state = DownloadState::new(
+        torrent.pieces.len(),
+        torrent.piece_length,
+        torrent.infohash,
+        torrent.pieces.clone(),
+        torrent.total_size as u64,
+    );
 
     // Step 3: Create client
     let peer_id = generate_peer_id();

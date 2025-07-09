@@ -326,28 +326,40 @@ impl BitTorrentClient {
         };
 
         // Store the block and check if piece is complete
-        let piece_complete = {
+        let piece_result = {
             let mut download_state = self.download_state.lock().await;
             download_state.complete_block(block_info, block_data.to_vec())
         };
 
-        if piece_complete {
-            let download_state = self.download_state.lock().await;
-            println!(
-                "Completed piece {} ({}/{})",
-                piece_index,
-                download_state.progress(),
-                download_state.total_pieces
-            );
-        } else {
-            let download_state = self.download_state.lock().await;
-            let piece_progress = download_state.piece_progress(piece_index);
-            println!(
-                "Piece {} progress: {:.1}% ({} blocks completed)",
-                piece_index,
-                piece_progress * 100.0,
-                download_state.completed_blocks()
-            );
+        match piece_result {
+            Ok(true) => {
+                // Piece is complete and verified
+                let download_state = self.download_state.lock().await;
+                println!(
+                    "✅ Piece {} verified and completed ({}/{})",
+                    piece_index,
+                    download_state.progress(),
+                    download_state.total_pieces
+                );
+            }
+            Ok(false) => {
+                // Block stored but piece not yet complete
+                let download_state = self.download_state.lock().await;
+                let piece_progress = download_state.piece_progress(piece_index);
+                println!(
+                    "Piece {} progress: {:.1}% ({} blocks completed)",
+                    piece_index,
+                    piece_progress * 100.0,
+                    download_state.completed_blocks()
+                );
+            }
+            Err(e) => {
+                // SHA1 verification failed
+                println!("❌ {}", e);
+                // Re-request all blocks for this piece since verification failed
+                // The DownloadState has already cleaned up the failed piece
+                return Err(e.into());
+            }
         }
 
         Ok(())
@@ -428,42 +440,6 @@ impl BitTorrentClient {
             "Requested block: piece {}, offset {}, length {} from peer",
             block_info.piece_index, block_info.offset, block_info.length
         );
-        Ok(())
-    }
-
-    /// Request a piece from a peer (legacy method - now requests all blocks)
-    async fn request_piece(
-        &self,
-        stream: &mut TcpStream,
-        piece_index: usize,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let piece_length = {
-            let download_state = self.download_state.lock().await;
-            download_state.piece_length as usize
-        };
-
-        // Request all blocks in the piece
-        let mut offset = 0;
-        while offset < piece_length {
-            let block_length = (piece_length - offset).min(PIECE_BLOCK_SIZE);
-            let block_info = BlockInfo {
-                piece_index,
-                offset,
-                length: block_length,
-            };
-
-            // Mark as requested
-            {
-                let mut download_state = self.download_state.lock().await;
-                download_state.mark_block_requested(block_info.clone());
-            }
-
-            // Request the block
-            self.request_block(stream, block_info).await?;
-
-            offset += block_length;
-        }
-
         Ok(())
     }
 
