@@ -1,5 +1,7 @@
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 
 const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
 
@@ -210,7 +212,7 @@ impl DownloadState {
         if let Some(piece_blocks) = self.piece_blocks.get(&piece_index) {
             let completed_blocks = piece_blocks.iter().filter(|block| block.is_some()).count();
             completed_blocks as f64 / piece_blocks.len() as f64
-        } else if self.pieces[piece_index].is_some() {
+        } else if self.pieces.get(piece_index).is_some() {
             1.0 // Complete
         } else {
             0.0 // Not started
@@ -237,12 +239,25 @@ impl DownloadState {
 
         // Count partial pieces
         for (piece_index, blocks) in &self.piece_blocks {
-            if self.pieces[*piece_index].is_none() {
+            if self.pieces.get(*piece_index).map_or(false, |p| p.is_none()) {
                 completed += blocks.iter().filter(|block| block.is_some()).count();
             }
         }
 
         completed
+    }
+
+    pub async fn write_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = File::create(path).await?;
+        file.set_len(self.total_size).await?;
+        for (i, piece) in self.pieces.iter().enumerate() {
+            match piece {
+                Some(data) => file.write_all(data).await?,
+                None => return Err(format!("Piece {} is missing", i).into()),
+            }
+        }
+
+        Ok(())
     }
 }
 

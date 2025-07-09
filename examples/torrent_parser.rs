@@ -124,7 +124,8 @@ fn extract_all_info(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Calculate some derived info
     let size_mb = torrent.total_size as f64 / (1024.0 * 1024.0);
     let piece_size_kb = torrent.piece_length as f64 / 1024.0;
-    let estimated_pieces = (torrent.total_size + torrent.piece_length - 1) / torrent.piece_length;
+    let estimated_pieces =
+        (torrent.total_size + torrent.piece_length as u64 - 1) / torrent.piece_length as u64;
 
     println!("  Size (MB): {:.2}", size_mb);
     println!("  Piece Size (KB): {:.1}", piece_size_kb);

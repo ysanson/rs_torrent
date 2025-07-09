@@ -666,6 +666,10 @@ impl BitTorrentClient {
             .map(|(addr, conn)| (*addr, conn.pending_requests.len(), conn.can_download()))
             .collect()
     }
+
+    pub async fn write_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.download_state.lock().await.write_to_file(path).await
+    }
 }
 
 impl Clone for BitTorrentClient {
