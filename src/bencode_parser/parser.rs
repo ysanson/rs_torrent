@@ -65,10 +65,6 @@ impl<'a> Value<'a> {
             .parse()
             .map_err(|e| BencodeError::ParseIntError(inp, e))?;
 
-        if length == 0 {
-            Err(BencodeError::InvalidBytesLength(start_inp))?;
-        }
-
         let (inp, characters) = take(length)(inp)?;
 
         Ok((inp, Value::Bytes(characters)))
