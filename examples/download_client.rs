@@ -59,6 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let (downloaded_pieces, total_pieces) = client.get_progress().await;
         let (downloaded_blocks, total_blocks) = client.get_block_progress().await;
+        let pipeline_stats = client.get_pipeline_stats().await;
+        let peer_info = client.get_peer_info().await;
 
         let piece_progress = (downloaded_pieces as f64 / total_pieces as f64) * 100.0;
         let block_progress = (downloaded_blocks as f64 / total_blocks as f64) * 100.0;
@@ -71,6 +73,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             downloaded_blocks,
             total_blocks,
             block_progress
+        );
+
+        // Show pipelining statistics
+        println!(
+            "Pipeline: {} requests sent, {} responses, {} timeouts, max depth: {}",
+            pipeline_stats.total_requests_sent,
+            pipeline_stats.total_responses_received,
+            pipeline_stats.total_timeouts,
+            pipeline_stats.max_pipeline_depth_seen
+        );
+
+        // Show active peer connections
+        let active_peers = peer_info
+            .iter()
+            .filter(|(_, _, can_download)| *can_download)
+            .count();
+        let total_pending: usize = peer_info.iter().map(|(_, pending, _)| pending).sum();
+        println!(
+            "Peers: {} active, {} total pending requests",
+            active_peers, total_pending
         );
 
         if client.is_complete().await {
@@ -166,34 +188,42 @@ async fn download_from_torrent_file(file_path: &str) -> Result<(), Box<dyn std::
 }
 
 /*
-=== HOW TO BUILD A BITTORRENT CLIENT WITH BLOCK-BASED DOWNLOADING ===
+=== HOW TO BUILD A BITTORRENT CLIENT WITH REQUEST PIPELINING ===
 
 1. **Understanding the Components**:
    - `Handshake`: Establishes connection with peer using BitTorrent protocol
    - `Message`: Handles peer communication (choke, unchoke, interested, have, bitfield, request, piece)
    - `DownloadState`: Manages which pieces and blocks we have and need
-   - `BitTorrentClient`: Orchestrates the entire download process
+   - `BitTorrentClient`: Orchestrates the entire download process with pipelining
    - `BlockInfo`: Represents a 16KB block within a piece
+   - `PeerConnection`: Tracks pending requests and pipeline state per peer
 
 2. **Connection Flow**:
    ```
-   Connect to Peer → Handshake → Exchange Bitfields → Request Blocks → Download Data
+   Connect to Peer → Handshake → Exchange Bitfields → Pipeline Block Requests → Download Data
    ```
 
-3. **Block-Based Downloading**:
+3. **Request Pipelining**:
+   - Send multiple block requests without waiting for responses
+   - Configurable pipeline depth (default: 10 requests per peer)
+   - Automatic timeout handling for stalled requests
+   - Improved bandwidth utilization and reduced latency
+
+4. **Block-Based Downloading**:
    - Each piece is split into 16KB blocks (PIECE_BLOCK_SIZE)
    - Blocks are downloaded independently and can be pipelined
    - Piece is complete when all blocks are received
    - More efficient than downloading entire pieces at once
 
-4. **Message Exchange Protocol**:
+5. **Message Exchange Protocol**:
    - Send "interested" to let peer know we want data
    - Wait for "unchoke" message from peer
-   - Send "request" messages for specific blocks (piece_index, offset, length)
+   - Send multiple "request" messages for specific blocks (pipelined)
    - Receive "piece" messages with actual block data
    - Handle "have" messages when peer gets new pieces
+   - Track pending requests and handle timeouts
 
-5. **Key Implementation Steps**:
+6. **Key Implementation Steps**:
 
    a) **Handshake Phase**:
       - Create handshake with torrent's infohash and your peer_id
@@ -205,50 +235,71 @@ async fn download_from_torrent_file(file_path: &str) -> Result<(), Box<dyn std::
       - Handle different message types appropriately
       - Update peer state (choking, interested, bitfield)
 
-   c) **Block Management**:
+   c) **Pipelined Block Management**:
       - Use DownloadState to track which blocks we need
-      - Request blocks from peers that have them and aren't choking us
+      - Send multiple block requests to fill pipeline (up to MAX_PIPELINE_DEPTH)
+      - Track pending requests per peer with timestamps
+      - Handle timeouts and re-request failed blocks
       - Handle piece messages and store downloaded block data
       - Combine blocks when all blocks of a piece are complete
 
-   d) **Concurrency**:
+   d) **Concurrency and Pipelining**:
       - Use async/await for non-blocking I/O
       - Spawn separate tasks for each peer connection
       - Use Arc<Mutex<>> for shared state between tasks
       - Pipeline multiple block requests to same peer
+      - Monitor pipeline depth and adjust dynamically
+      - Handle request timeouts and retries
 
-6. **Block-Level Progress Tracking**:
+7. **Pipeline Monitoring and Statistics**:
+   - Track requests sent, responses received, and timeouts
+   - Monitor maximum pipeline depth achieved
+   - Show active peer connections and pending requests
+   - Measure average response times
+
+8. **Block-Level Progress Tracking**:
    - Track individual block completion
    - Show both piece-level and block-level progress
    - Handle partial piece downloads efficiently
 
-7. **Error Handling**:
+9. **Error Handling**:
    - Handle connection timeouts
    - Validate message formats
    - Deal with peers that disconnect
-   - Retry failed block downloads
+   - Handle request timeouts and re-request blocks
+   - Retry failed block downloads from different peers
 
-8. **Optimization Opportunities**:
-   - Pipeline multiple block requests to same peer
-   - Implement endgame mode for final blocks
-   - Add piece verification with SHA1 hashes
-   - Smart block selection algorithms
-   - Implement tit-for-tat strategy for uploading
+10. **Optimization Features Implemented**:
+    - Request pipelining with configurable depth
+    - Automatic timeout detection and recovery
+    - SHA1 piece verification
+    - Smart block selection algorithms
+    - Pipeline statistics and monitoring
 
-9. **Real-world Considerations**:
-   - Rate limiting to avoid overwhelming peers
-   - Proper peer discovery via DHT
-   - Support for multiple trackers
-   - Handling partial files and resume capability
-   - Implementing the full BitTorrent protocol extensions
+11. **Future Optimizations**:
+    - Dynamic pipeline depth adjustment based on peer performance
+    - Implement endgame mode for final blocks
+    - Implement tit-for-tat strategy for uploading
+    - Adaptive request timeout based on peer latency
 
-10. **Testing**:
+12. **Real-world Considerations**:
+    - Rate limiting to avoid overwhelming peers
+    - Proper peer discovery via DHT
+    - Support for multiple trackers
+    - Handling partial files and resume capability
+    - Implementing the full BitTorrent protocol extensions
+    - Pipeline backpressure and flow control
+
+13. **Testing**:
     - Start with simple test peers
     - Use small torrent files initially
     - Monitor network traffic and debug messages
     - Test with different peer behaviors
     - Verify block assembly into complete pieces
+    - Test pipeline behavior under various network conditions
+    - Verify timeout handling and recovery
 
-This block-based approach provides much better performance and more granular
-progress tracking compared to downloading entire pieces at once.
+This pipelined, block-based approach provides significantly better performance
+through parallelism, reduced latency, and more granular progress tracking
+compared to downloading entire pieces sequentially.
 */

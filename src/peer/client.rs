@@ -15,6 +15,8 @@ use tokio::time::timeout;
 pub const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PIPELINE_DEPTH: usize = 10; // Maximum number of pending requests per peer
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60); // Request timeout
 
 /// Represents the state of a connection to a peer
 #[derive(Debug, Clone)]
@@ -25,6 +27,8 @@ pub struct PeerConnection {
     pub peer_choking: bool,
     pub peer_interested: bool,
     pub bitfield: Option<Bitfield>,
+    pub pending_requests: HashMap<BlockInfo, std::time::Instant>, // Blocks we've requested with timestamps
+    pub last_request_time: Option<std::time::Instant>,
 }
 
 impl PeerConnection {
@@ -36,6 +40,8 @@ impl PeerConnection {
             peer_choking: true,
             peer_interested: false,
             bitfield: None,
+            pending_requests: HashMap::new(),
+            last_request_time: None,
         }
     }
 
@@ -49,12 +55,63 @@ impl PeerConnection {
     pub fn can_download(&self) -> bool {
         !self.peer_choking && self.am_interested
     }
+
+    pub fn can_pipeline_request(&self) -> bool {
+        self.can_download() && self.pending_requests.len() < MAX_PIPELINE_DEPTH
+    }
+
+    pub fn add_pending_request(&mut self, block_info: BlockInfo) {
+        let now = std::time::Instant::now();
+        self.pending_requests.insert(block_info, now);
+        self.last_request_time = Some(now);
+    }
+
+    pub fn remove_pending_request(&mut self, block_info: &BlockInfo) -> bool {
+        self.pending_requests.remove(block_info).is_some()
+    }
+
+    pub fn has_pending_requests(&self) -> bool {
+        !self.pending_requests.is_empty()
+    }
+
+    pub fn get_timed_out_requests(&self) -> Vec<BlockInfo> {
+        let now = std::time::Instant::now();
+        self.pending_requests
+            .iter()
+            .filter_map(|(block_info, timestamp)| {
+                if now.duration_since(*timestamp) > REQUEST_TIMEOUT {
+                    Some(block_info.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn clear_timed_out_requests(&mut self) -> Vec<BlockInfo> {
+        let timed_out = self.get_timed_out_requests();
+        for block_info in &timed_out {
+            self.pending_requests.remove(block_info);
+        }
+        timed_out
+    }
+}
+
+/// Statistics for pipelining performance
+#[derive(Debug, Clone, Default)]
+pub struct PipelineStats {
+    pub total_requests_sent: u64,
+    pub total_responses_received: u64,
+    pub total_timeouts: u64,
+    pub max_pipeline_depth_seen: usize,
+    pub average_response_time_ms: f64,
 }
 
 /// Main BitTorrent client for downloading from peers
 pub struct BitTorrentClient {
     pub download_state: Arc<Mutex<DownloadState>>,
     pub connections: Arc<Mutex<HashMap<SocketAddr, PeerConnection>>>,
+    pub pipeline_stats: Arc<Mutex<PipelineStats>>,
     pub peer_id: [u8; 20],
 }
 
@@ -63,6 +120,7 @@ impl BitTorrentClient {
         Self {
             download_state: Arc::new(Mutex::new(download_state)),
             connections: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_stats: Arc::new(Mutex::new(PipelineStats::default())),
             peer_id,
         }
     }
@@ -149,6 +207,11 @@ impl BitTorrentClient {
                     eprintln!("Error handling peer {}: {}", addr, e);
                     break;
                 }
+            }
+
+            // Handle request timeouts
+            if let Err(e) = self.handle_request_timeouts(&addr).await {
+                eprintln!("Error handling timeouts for peer {}: {}", addr, e);
             }
 
             // Try to download blocks if we can
@@ -325,6 +388,18 @@ impl BitTorrentClient {
             length: block_data.len(),
         };
 
+        // Remove from pending requests and update stats
+        {
+            let mut connections = self.connections.lock().await;
+            if let Some(conn) = connections.get_mut(addr) {
+                if conn.remove_pending_request(&block_info) {
+                    // Update response stats
+                    let mut stats = self.pipeline_stats.lock().await;
+                    stats.total_responses_received += 1;
+                }
+            }
+        }
+
         // Store the block and check if piece is complete
         let piece_result = {
             let mut download_state = self.download_state.lock().await;
@@ -378,44 +453,81 @@ impl BitTorrentClient {
                 .map(|conn| conn.can_download())
                 .unwrap_or(false)
         };
-
         if !can_download {
-            return Ok(());
+            return Err("Peer is not ready to download".into());
         }
 
-        // Find a block to download
-        let block_to_download = {
-            let download_state = self.download_state.lock().await;
-            let connections = self.connections.lock().await;
+        // Fill pipeline with requests up to MAX_PIPELINE_DEPTH
+        while self.can_send_more_requests(addr).await {
+            // Find a block to download
+            let block_to_download = {
+                let download_state = self.download_state.lock().await;
+                let connections = self.connections.lock().await;
 
-            if let Some(conn) = connections.get(addr) {
-                if let Some(ref bitfield) = conn.bitfield {
-                    // Convert bitfield to bool vector for compatibility
-                    let peer_bitfield: Vec<bool> = (0..download_state.total_pieces)
-                        .map(|i| bitfield.has_piece(i))
-                        .collect();
+                if let Some(conn) = connections.get(addr) {
+                    if let Some(ref bitfield) = conn.bitfield {
+                        // Convert bitfield to bool vector for compatibility
+                        let peer_bitfield: Vec<bool> = (0..download_state.total_pieces)
+                            .map(|i| bitfield.has_piece(i))
+                            .collect();
 
-                    download_state.pick_block(&peer_bitfield)
+                        download_state.pick_block(&peer_bitfield)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
+            };
+
+            if let Some(block_info) = block_to_download {
+                // Mark as requested in download state
+                {
+                    let mut download_state = self.download_state.lock().await;
+                    download_state.mark_block_requested(block_info.clone());
+                }
+
+                // Add to peer's pending requests
+                {
+                    let mut connections = self.connections.lock().await;
+                    if let Some(conn) = connections.get_mut(addr) {
+                        conn.add_pending_request(block_info.clone());
+                    }
+                }
+
+                // Send the request
+                self.request_block(stream, block_info).await?;
+
+                // Update pipeline stats
+                {
+                    let mut stats = self.pipeline_stats.lock().await;
+                    stats.total_requests_sent += 1;
+
+                    let connections = self.connections.lock().await;
+                    if let Some(conn) = connections.get(addr) {
+                        let current_depth = conn.pending_requests.len();
+                        if current_depth > stats.max_pipeline_depth_seen {
+                            stats.max_pipeline_depth_seen = current_depth;
+                        }
+                    }
+                }
             } else {
-                None
+                // No more blocks available
+                break;
             }
-        };
-
-        if let Some(block_info) = block_to_download {
-            // Mark as requested
-            {
-                let mut download_state = self.download_state.lock().await;
-                download_state.mark_block_requested(block_info.clone());
-            }
-
-            // Request the block
-            self.request_block(stream, block_info).await?;
         }
 
         Ok(())
+    }
+
+    /// Check if we can send more requests to this peer
+    async fn can_send_more_requests(&self, addr: &SocketAddr) -> bool {
+        let connections = self.connections.lock().await;
+        if let Some(conn) = connections.get(addr) {
+            conn.can_pipeline_request()
+        } else {
+            false
+        }
     }
 
     /// Request a block from a peer
@@ -436,10 +548,64 @@ impl BitTorrentClient {
         };
 
         stream.write_all(&request_msg.serialize()).await?;
+
+        // Get pipeline depth for logging
+        let pipeline_depth = {
+            let connections = self.connections.lock().await;
+            connections
+                .get(&SocketAddr::from((
+                    stream.peer_addr()?.ip(),
+                    stream.peer_addr()?.port(),
+                )))
+                .map(|conn| conn.pending_requests.len())
+                .unwrap_or(0)
+        };
+
         println!(
-            "Requested block: piece {}, offset {}, length {} from peer",
-            block_info.piece_index, block_info.offset, block_info.length
+            "📤 Requested block: piece {}, offset {}, length {} from peer {} (pipeline: {})",
+            block_info.piece_index,
+            block_info.offset,
+            block_info.length,
+            stream.peer_addr()?,
+            pipeline_depth
         );
+        Ok(())
+    }
+
+    /// Handle request timeouts for a peer
+    async fn handle_request_timeouts(
+        &self,
+        addr: &SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let timed_out_requests = {
+            let mut connections = self.connections.lock().await;
+            if let Some(conn) = connections.get_mut(addr) {
+                conn.clear_timed_out_requests()
+            } else {
+                Vec::new()
+            }
+        };
+
+        if !timed_out_requests.is_empty() {
+            println!(
+                "⏰ {} requests timed out for peer {}, removing from download state",
+                timed_out_requests.len(),
+                addr
+            );
+
+            // Update timeout stats
+            {
+                let mut stats = self.pipeline_stats.lock().await;
+                stats.total_timeouts += timed_out_requests.len() as u64;
+            }
+
+            // Remove timed out requests from download state so they can be re-requested
+            let mut download_state = self.download_state.lock().await;
+            for block_info in timed_out_requests {
+                download_state.requested_blocks.remove(&block_info);
+            }
+        }
+
         Ok(())
     }
 
@@ -485,6 +651,21 @@ impl BitTorrentClient {
         let download_state = self.download_state.lock().await;
         download_state.is_complete()
     }
+
+    /// Get pipelining statistics
+    pub async fn get_pipeline_stats(&self) -> PipelineStats {
+        let stats = self.pipeline_stats.lock().await;
+        stats.clone()
+    }
+
+    /// Get detailed peer connection information
+    pub async fn get_peer_info(&self) -> Vec<(SocketAddr, usize, bool)> {
+        let connections = self.connections.lock().await;
+        connections
+            .iter()
+            .map(|(addr, conn)| (*addr, conn.pending_requests.len(), conn.can_download()))
+            .collect()
+    }
 }
 
 impl Clone for BitTorrentClient {
@@ -492,6 +673,7 @@ impl Clone for BitTorrentClient {
         Self {
             download_state: Arc::clone(&self.download_state),
             connections: Arc::clone(&self.connections),
+            pipeline_stats: Arc::clone(&self.pipeline_stats),
             peer_id: self.peer_id,
         }
     }
@@ -514,5 +696,78 @@ mod tests {
         assert!(conn.peer_choking);
         assert!(!conn.peer_interested);
         assert!(conn.bitfield.is_none());
+        assert!(conn.pending_requests.is_empty());
+        assert!(conn.last_request_time.is_none());
+    }
+
+    #[test]
+    fn test_peer_connection_pipelining() {
+        use std::net::Ipv4Addr;
+        let peer = Peer {
+            ip_addr: Ipv4Addr::new(192, 168, 1, 1),
+            port: 6881,
+        };
+        let mut conn = PeerConnection::new(peer);
+
+        // Initially can't download because peer is choking
+        assert!(!conn.can_download());
+        assert!(!conn.can_pipeline_request());
+
+        // Unchoke and set interested
+        conn.peer_choking = false;
+        conn.am_interested = true;
+        assert!(conn.can_download());
+        assert!(conn.can_pipeline_request());
+
+        // Add requests up to pipeline depth
+        for i in 0..MAX_PIPELINE_DEPTH {
+            let block_info = BlockInfo {
+                piece_index: i,
+                offset: 0,
+                length: 16384,
+            };
+            conn.add_pending_request(block_info);
+        }
+
+        // Should not be able to pipeline more
+        assert!(!conn.can_pipeline_request());
+
+        // Remove one request
+        let block_info = BlockInfo {
+            piece_index: 0,
+            offset: 0,
+            length: 16384,
+        };
+        assert!(conn.remove_pending_request(&block_info));
+        assert!(conn.can_pipeline_request());
+    }
+
+    #[test]
+    fn test_request_timeout_handling() {
+        use std::net::Ipv4Addr;
+        let peer = Peer {
+            ip_addr: Ipv4Addr::new(192, 168, 1, 1),
+            port: 6881,
+        };
+        let mut conn = PeerConnection::new(peer);
+
+        // Add a request with manual timestamp (simulating old request)
+        let block_info = BlockInfo {
+            piece_index: 0,
+            offset: 0,
+            length: 16384,
+        };
+        let old_time = std::time::Instant::now() - Duration::from_secs(120); // 2 minutes ago
+        conn.pending_requests.insert(block_info.clone(), old_time);
+
+        // Check that it's detected as timed out
+        let timed_out = conn.get_timed_out_requests();
+        assert_eq!(timed_out.len(), 1);
+        assert_eq!(timed_out[0], block_info);
+
+        // Clear timed out requests
+        let cleared = conn.clear_timed_out_requests();
+        assert_eq!(cleared.len(), 1);
+        assert!(conn.pending_requests.is_empty());
     }
 }
