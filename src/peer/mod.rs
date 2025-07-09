@@ -13,3 +13,6 @@ pub struct Peer {
     pub ip_addr: Ipv4Addr,
     pub port: u16,
 }
+
+pub use client::{BitTorrentClient, PIECE_BLOCK_SIZE};
+pub use state::DownloadState;
