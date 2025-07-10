@@ -22,7 +22,7 @@ fn build_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError>
     let mut base = Url::parse(&torrent.announce)?;
 
     let info_hash = encode_bytes(&torrent.infohash);
-    let peer_id = encode_bytes(&PEER_ID); // Make sure PEER_ID is [u8; 20]
+    let peer_id = encode_bytes(&PEER_ID);
 
     let query = format!(
         "info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&compact=1&left={}",
@@ -66,9 +66,7 @@ pub async fn announce_to_tracker(
     port: u16,
 ) -> Result<(i64, Vec<Peer>), Box<dyn Error>> {
     let url = build_tracker_url(torrent, port)?;
-    println!("{:?}", url);
     let response_bytes = contact_tracker(&url).await?;
-    println!("{:?}", response_bytes);
     let values = parse_owned(&response_bytes)?;
     let dict = match values.first() {
         Some(ValueOwned::Dictionary { entries, hash: _ }) => entries,
@@ -85,7 +83,6 @@ pub async fn announce_to_tracker(
         Some(ValueOwned::Bytes(peers)) => extract_peers(peers),
         _ => return Err("Peers is not a dict".into()),
     };
-    
 
     if peers.is_none() {
         return Err("Peers cannot be extracted".into());
