@@ -287,7 +287,7 @@ impl BitTorrentClient {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         // Read message length
         let mut len_buf = [0u8; 4];
-        match timeout(Duration::from_millis(500), stream.read_exact(&mut len_buf)).await {
+        match timeout(Duration::from_millis(5000), stream.read_exact(&mut len_buf)).await {
             Ok(Ok(_)) => {}
             Ok(Err(_)) => return Ok(false), // Connection closed
             Err(_) => return Ok(true),      // Timeout, continue
