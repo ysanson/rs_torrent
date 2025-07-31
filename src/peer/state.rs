@@ -212,7 +212,11 @@ impl DownloadState {
         if let Some(piece_blocks) = self.piece_blocks.get(&piece_index) {
             let completed_blocks = piece_blocks.iter().filter(|block| block.is_some()).count();
             completed_blocks as f64 / piece_blocks.len() as f64
-        } else if self.pieces.get(piece_index).is_some() {
+        } else if self
+            .pieces
+            .get(piece_index)
+            .map_or(false, |piece| piece.is_some())
+        {
             1.0 // Complete
         } else {
             0.0 // Not started

@@ -243,8 +243,8 @@ mod tests {
         let (_, v) = Value::parse_bytes(b"1:rock").unwrap();
         assert_matches!(v, Value::Bytes(b"r"));
 
-        let v = Value::parse_bytes(b"0:a").unwrap_err();
-        assert_matches!(v, nom::Err::Failure(BencodeError::InvalidBytesLength(_)));
+        let (_, v) = Value::parse_bytes(b"0:a").unwrap();
+        assert_matches!(v, Value::Bytes(b""));
     }
 
     #[test]
@@ -438,6 +438,48 @@ mod tests {
             if let Value::Bytes(announce) = *announce {
                 let announce = std::str::from_utf8(announce).unwrap();
                 assert_eq!(announce, "http://bttracker.debian.org:6969/announce");
+            }
+
+            let url_list = dict.get(b"url-list".as_slice()).unwrap();
+            assert_matches!(*url_list, Value::List(_));
+        }
+    }
+
+    #[test]
+    fn test_parse_torrent_multiple_files() {
+        let data = parse(include_bytes!("../../test_data/big-buck-bunny.torrent")).unwrap();
+
+        assert_eq!(data.len(), 1);
+
+        let v = data.first().unwrap();
+        assert_matches!(
+            *v,
+            Value::Dictionary {
+                entries: _,
+                hash: _
+            }
+        );
+
+        if let Value::Dictionary {
+            entries: dict,
+            hash: _,
+        } = v
+        {
+            let info = dict.get(b"info".as_slice()).unwrap();
+            assert_matches!(
+                *info,
+                Value::Dictionary {
+                    entries: _,
+                    hash: _
+                }
+            );
+
+            let announce = dict.get(b"announce".as_slice()).unwrap();
+            assert_matches!(*announce, Value::Bytes(_));
+
+            if let Value::Bytes(announce) = *announce {
+                let announce = std::str::from_utf8(announce).unwrap();
+                assert_eq!(announce, "udp://tracker.leechers-paradise.org:6969");
             }
 
             let url_list = dict.get(b"url-list".as_slice()).unwrap();

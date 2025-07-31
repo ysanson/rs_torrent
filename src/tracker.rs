@@ -24,12 +24,20 @@ fn build_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError>
     let info_hash = encode_bytes(&torrent.infohash);
     let peer_id = encode_bytes(&PEER_ID);
 
-    let query = format!(
+    let new_params = format!(
         "info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&compact=1&left={}",
         info_hash, peer_id, port, torrent.length
     );
 
-    base.set_query(Some(&query));
+    // Preserve existing query parameters and append new ones
+    let existing_query = base.query().unwrap_or("");
+    let combined_query = if existing_query.is_empty() {
+        new_params
+    } else {
+        format!("{}&{}", existing_query, new_params)
+    };
+
+    base.set_query(Some(&combined_query));
     Ok(base.to_string())
 }
 
