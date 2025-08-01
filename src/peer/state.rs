@@ -195,6 +195,7 @@ impl DownloadState {
     pub fn complete_piece(&mut self, index: usize, data: Vec<u8>) {
         self.pieces[index] = Some(data);
         self.requested.remove(&index);
+        self.piece_blocks.remove(&index);
     }
 
     /// Has all pieces?
