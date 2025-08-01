@@ -762,24 +762,48 @@ impl BitTorrentClient {
 
     /// Start downloading from multiple peers concurrently
     pub async fn start_download(&self, peers: Vec<Peer>) -> Result<(), Box<dyn std::error::Error>> {
-        let mut handles = Vec::new();
+        self.connect_to_new_peers(peers).await;
 
-        for peer in peers {
+        // Keep running until download is complete
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if self.is_complete().await {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Connect to new peers without waiting for completion (for reannouncement)
+    pub async fn connect_to_new_peers(&self, peers: Vec<Peer>) {
+        let mut new_peers = Vec::new();
+
+        // Filter out peers we're already connected to
+        {
+            let connections = self.connections.lock().await;
+            for peer in peers {
+                let addr = std::net::SocketAddr::from((peer.ip_addr, peer.port));
+                if !connections.contains_key(&addr) {
+                    new_peers.push(peer);
+                }
+            }
+        }
+
+        if new_peers.is_empty() {
+            return;
+        }
+
+        println!("🔗 Connecting to {} new peers", new_peers.len());
+
+        for peer in new_peers {
             let client = self.clone();
-            let handle = tokio::spawn(async move {
+            tokio::spawn(async move {
                 if let Err(e) = client.peer_worker(peer).await {
                     eprintln!("Peer worker error: {}", e);
                 }
             });
-            handles.push(handle);
         }
-
-        // Wait for all workers to complete
-        for handle in handles {
-            handle.await?;
-        }
-
-        Ok(())
     }
 
     /// Get download progress

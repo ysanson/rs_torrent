@@ -18,6 +18,29 @@ fn encode_bytes(bytes: &[u8]) -> String {
     percent_encode(bytes, NON_ALPHANUMERIC).to_string()
 }
 
+pub fn build_completion_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError> {
+    let mut base = Url::parse(&torrent.announce)?;
+
+    let info_hash = encode_bytes(&torrent.infohash);
+    let peer_id = encode_bytes(&PEER_ID);
+
+    let new_params = format!(
+        "info_hash={}&peer_id={}&port={}&uploaded=0&downloaded={}&compact=1&left=0&event=completed",
+        info_hash, peer_id, port, torrent.length
+    );
+
+    // Preserve existing query parameters and append new ones
+    let existing_query = base.query().unwrap_or("");
+    let combined_query = if existing_query.is_empty() {
+        new_params
+    } else {
+        format!("{}&{}", existing_query, new_params)
+    };
+
+    base.set_query(Some(&combined_query));
+    Ok(base.to_string())
+}
+
 fn build_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError> {
     let mut base = Url::parse(&torrent.announce)?;
 
@@ -41,7 +64,7 @@ fn build_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError>
     Ok(base.to_string())
 }
 
-async fn contact_tracker(tracker_url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+pub async fn contact_tracker(tracker_url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let response = HTTP_CLIENT.get(tracker_url).send().await?;
 
     if !response.status().is_success() {
@@ -314,5 +337,36 @@ mod tests {
         torrent.length = u32::MAX;
         let url = build_tracker_url(&torrent, 6881).unwrap();
         assert!(url.contains(&format!("left={}", u32::MAX)));
+    }
+
+    #[test]
+    fn test_build_completion_tracker_url() {
+        let torrent = create_test_torrent();
+        let port = 6881;
+        let url = build_completion_tracker_url(&torrent, port).unwrap();
+
+        assert!(url.contains("http://tracker.example.com:8080/announce"));
+        assert!(url.contains("port=6881"));
+        assert!(url.contains("uploaded=0"));
+        assert!(url.contains("downloaded=1048576")); // Should be torrent.length
+        assert!(url.contains("left=0")); // Should be 0 for completion
+        assert!(url.contains("event=completed")); // Completion event
+        assert!(url.contains("compact=1"));
+        assert!(url.contains("info_hash="));
+        assert!(url.contains("peer_id="));
+    }
+
+    #[test]
+    fn test_build_completion_tracker_url_with_existing_params() {
+        let mut torrent = create_test_torrent();
+        torrent.announce = "http://tracker.example.com:8080/announce?existing=param".to_string();
+        let port = 6881;
+        let url = build_completion_tracker_url(&torrent, port).unwrap();
+
+        // Should preserve existing query params and add completion ones
+        assert!(url.contains("existing=param"));
+        assert!(url.contains("event=completed"));
+        assert!(url.contains("left=0"));
+        assert!(url.contains("downloaded=1048576"));
     }
 }
