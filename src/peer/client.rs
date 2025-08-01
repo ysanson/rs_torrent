@@ -14,9 +14,10 @@ use tokio::time::timeout;
 
 pub const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_PIPELINE_DEPTH: usize = 10; // Maximum number of pending requests per peer
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60); // Request timeout
+const READ_TIMEOUT: Duration = Duration::from_secs(45); // Increased for multi-peer scenarios
+const MAX_PIPELINE_DEPTH: usize = 5; // Reduced to prevent peer overload
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30); // Reduced for faster recovery
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(120); // Keep-alive interval
 
 /// Represents the state of a connection to a peer
 #[derive(Debug, Clone)]
@@ -219,8 +220,18 @@ impl BitTorrentClient {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error handling peer {}: {}", addr, e);
-                    break;
+                    let error_msg = e.to_string();
+                    if error_msg.contains("deadline has elapsed") {
+                        println!(
+                            "⏰ Read timeout for peer {}, attempting to recover...",
+                            addr
+                        );
+                        // Don't break immediately on timeout, try to recover
+                        continue;
+                    } else {
+                        eprintln!("Error handling peer {}: {}", addr, e);
+                        break;
+                    }
                 }
             }
 
@@ -232,19 +243,25 @@ impl BitTorrentClient {
             // Try to download blocks if we can
             if let Err(e) = self.try_download_blocks(&mut stream, &addr).await {
                 // Don't break on "not ready" errors, just continue
-                if !e.to_string().contains("not ready") {
+                let error_msg = e.to_string();
+                if !error_msg.contains("not ready") && !error_msg.contains("timeout") {
                     eprintln!("Error downloading from peer {}: {}", addr, e);
                     break;
+                } else if error_msg.contains("timeout") {
+                    println!(
+                        "⏰ Timeout in try_download_blocks for peer {}, continuing...",
+                        addr
+                    );
                 }
             }
 
-            // Print diagnostics every 30 seconds for debugging
+            // Print diagnostics every 60 seconds for debugging (reduced frequency)
             {
                 let connections = self.connections.lock().await;
                 if let Some(conn) = connections.get(&addr) {
                     if conn
                         .last_request_time
-                        .map(|t| t.elapsed().as_secs() > 30)
+                        .map(|t| t.elapsed().as_secs() > 60)
                         .unwrap_or(true)
                     {
                         drop(connections);
@@ -285,12 +302,24 @@ impl BitTorrentClient {
         stream: &mut TcpStream,
         addr: &SocketAddr,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        // Read message length
+        // Read message length with adaptive timeout
         let mut len_buf = [0u8; 4];
-        match timeout(Duration::from_millis(5000), stream.read_exact(&mut len_buf)).await {
+        match timeout(
+            Duration::from_millis(10000),
+            stream.read_exact(&mut len_buf),
+        )
+        .await
+        {
             Ok(Ok(_)) => {}
-            Ok(Err(_)) => return Ok(false), // Connection closed
-            Err(_) => return Ok(true),      // Timeout, continue
+            Ok(Err(_)) => {
+                println!("🔌 Connection closed by peer {}", addr);
+                return Ok(false); // Connection closed
+            }
+            Err(_) => {
+                // Timeout - check if peer is still responsive
+                println!("⏰ Read timeout for peer {}, continuing...", addr);
+                return Ok(true); // Timeout, continue
+            }
         }
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
@@ -300,9 +329,22 @@ impl BitTorrentClient {
             return Ok(true);
         }
 
-        // Read the full message
+        // Read the full message with better error handling
         let mut msg_buf = vec![0u8; msg_len];
-        timeout(READ_TIMEOUT, stream.read_exact(&mut msg_buf)).await??;
+        match timeout(READ_TIMEOUT, stream.read_exact(&mut msg_buf)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                println!(
+                    "🔌 Connection error reading message from peer {}: {}",
+                    addr, e
+                );
+                return Ok(false); // Connection closed
+            }
+            Err(_) => {
+                println!("⏰ Timeout reading message from peer {}", addr);
+                return Err("deadline has elapsed".into()); // Let caller handle timeout
+            }
+        }
 
         // Reconstruct the full message buffer
         let mut full_msg = Vec::with_capacity(4 + msg_len);
@@ -531,35 +573,44 @@ impl BitTorrentClient {
         }
 
         // Fill pipeline with requests up to MAX_PIPELINE_DEPTH
-        while self.can_send_more_requests(addr).await {
-            // Find a block to download
-            let block_to_download = {
-                let download_state = self.download_state.lock().await;
+        loop {
+            // Check pipeline capacity and find a block atomically
+            let (block_to_download, can_pipeline) = {
+                let mut download_state = self.download_state.lock().await;
                 let connections = self.connections.lock().await;
 
                 if let Some(conn) = connections.get(addr) {
-                    if let Some(ref bitfield) = conn.bitfield {
-                        // Convert bitfield to bool vector for compatibility
-                        let peer_bitfield: Vec<bool> = (0..download_state.total_pieces)
-                            .map(|i| bitfield.has_piece(i))
-                            .collect();
+                    let can_pipeline = conn.can_pipeline_request();
+                    if can_pipeline {
+                        if let Some(ref bitfield) = conn.bitfield {
+                            // Convert bitfield to bool vector for compatibility
+                            let peer_bitfield: Vec<bool> = (0..download_state.total_pieces)
+                                .map(|i| bitfield.has_piece(i))
+                                .collect();
 
-                        download_state.pick_block(&peer_bitfield)
+                            // Atomically pick block and mark as requested to prevent race conditions
+                            if let Some(block_info) = download_state.pick_block(&peer_bitfield) {
+                                download_state.mark_block_requested(block_info.clone());
+                                (Some(block_info), true)
+                            } else {
+                                (None, true)
+                            }
+                        } else {
+                            (None, true)
+                        }
                     } else {
-                        None
+                        (None, false)
                     }
                 } else {
-                    None
+                    (None, false)
                 }
             };
 
-            if let Some(block_info) = block_to_download {
-                // Mark as requested in download state
-                {
-                    let mut download_state = self.download_state.lock().await;
-                    download_state.mark_block_requested(block_info.clone());
-                }
+            if !can_pipeline {
+                break; // Can't send more requests due to pipeline limit
+            }
 
+            if let Some(block_info) = block_to_download {
                 // Add to peer's pending requests
                 {
                     let mut connections = self.connections.lock().await;
@@ -594,14 +645,6 @@ impl BitTorrentClient {
     }
 
     /// Check if we can send more requests to this peer
-    async fn can_send_more_requests(&self, addr: &SocketAddr) -> bool {
-        let connections = self.connections.lock().await;
-        if let Some(conn) = connections.get(addr) {
-            conn.can_pipeline_request()
-        } else {
-            false
-        }
-    }
 
     /// Request a block from a peer
     async fn request_block(
@@ -692,7 +735,7 @@ impl BitTorrentClient {
             let connections = self.connections.lock().await;
             if let Some(conn) = connections.get(addr) {
                 if let Some(last_time) = conn.last_request_time {
-                    last_time.elapsed() > Duration::from_secs(30)
+                    last_time.elapsed() > KEEP_ALIVE_INTERVAL
                 } else {
                     true // No previous activity, send keep-alive
                 }
