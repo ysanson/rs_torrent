@@ -121,13 +121,7 @@ impl<'a> Value<'a> {
         let raw_slice = &input[..parsed_len];
         let hash: [u8; 20] = Sha1::digest(raw_slice).into();
 
-        Ok((
-            inp,
-            Value::Dictionary {
-                entries: entries,
-                hash: hash,
-            },
-        ))
+        Ok((inp, Value::Dictionary { entries, hash }))
     }
 }
 

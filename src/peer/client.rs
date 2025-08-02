@@ -480,16 +480,23 @@ impl BitTorrentClient {
             length: block_data.len(),
         };
 
-        // Remove from pending requests and update stats
-        {
+        // Remove from pending requests and update stats first
+        // CONSISTENT LOCK ORDER: download_state first, then connections
+        let request_was_pending = {
+            let _download_state = self.download_state.lock().await;
             let mut connections = self.connections.lock().await;
+
             if let Some(conn) = connections.get_mut(addr) {
-                if conn.remove_pending_request(&block_info) {
-                    // Update response stats
-                    let mut stats = self.pipeline_stats.lock().await;
-                    stats.total_responses_received += 1;
-                }
+                conn.remove_pending_request(&block_info)
+            } else {
+                false
             }
+        };
+
+        // Update stats separately to avoid holding multiple locks
+        if request_was_pending {
+            let mut stats = self.pipeline_stats.lock().await;
+            stats.total_responses_received += 1;
         }
 
         // Store the block and check if piece is complete
@@ -575,6 +582,7 @@ impl BitTorrentClient {
         // Fill pipeline with requests up to MAX_PIPELINE_DEPTH
         loop {
             // Check pipeline capacity and find a block atomically
+            // CONSISTENT LOCK ORDER: download_state first, then connections
             let (block_to_download, can_pipeline) = {
                 let mut download_state = self.download_state.lock().await;
                 let connections = self.connections.lock().await;
@@ -622,17 +630,20 @@ impl BitTorrentClient {
                 // Send the request
                 self.request_block(stream, block_info).await?;
 
-                // Update pipeline stats
+                // Update pipeline stats (get depth first, then update stats separately)
+                let current_depth = {
+                    let connections = self.connections.lock().await;
+                    connections
+                        .get(addr)
+                        .map(|conn| conn.pending_requests.len())
+                        .unwrap_or(0)
+                };
+
                 {
                     let mut stats = self.pipeline_stats.lock().await;
                     stats.total_requests_sent += 1;
-
-                    let connections = self.connections.lock().await;
-                    if let Some(conn) = connections.get(addr) {
-                        let current_depth = conn.pending_requests.len();
-                        if current_depth > stats.max_pipeline_depth_seen {
-                            stats.max_pipeline_depth_seen = current_depth;
-                        }
+                    if current_depth > stats.max_pipeline_depth_seen {
+                        stats.max_pipeline_depth_seen = current_depth;
                     }
                 }
             } else {
@@ -709,16 +720,19 @@ impl BitTorrentClient {
                 addr
             );
 
-            // Update timeout stats
+            // CONSISTENT LOCK ORDER: download_state first, then stats separately
+            // Remove timed out requests from download state so they can be re-requested
+            {
+                let mut download_state = self.download_state.lock().await;
+                for block_info in &timed_out_requests {
+                    download_state.requested_blocks.remove(block_info);
+                }
+            }
+
+            // Update timeout stats (separate lock, no ordering conflict)
             {
                 let mut stats = self.pipeline_stats.lock().await;
                 stats.total_timeouts += timed_out_requests.len() as u64;
-            }
-
-            // Remove timed out requests from download state so they can be re-requested
-            let mut download_state = self.download_state.lock().await;
-            for block_info in timed_out_requests {
-                download_state.requested_blocks.remove(&block_info);
             }
         }
 
@@ -844,24 +858,33 @@ impl BitTorrentClient {
 
     /// Print diagnostic information about all peer connections
     pub async fn print_peer_diagnostics(&self) {
-        let connections = self.connections.lock().await;
+        // CONSISTENT LOCK ORDER: download_state first, then connections
+        let connection_info = {
+            let download_state = self.download_state.lock().await;
+            let connections = self.connections.lock().await;
+
+            if connections.is_empty() {
+                println!("\n=== PEER CONNECTION DIAGNOSTICS ===");
+                println!("No active peer connections");
+                return;
+            }
+
+            let total_pieces = download_state.total_pieces;
+            connections
+                .iter()
+                .map(|(addr, conn)| {
+                    let bitfield_pieces = if let Some(ref bf) = conn.bitfield {
+                        (0..total_pieces).filter(|&i| bf.has_piece(i)).count()
+                    } else {
+                        0
+                    };
+                    (*addr, conn.clone(), bitfield_pieces)
+                })
+                .collect::<Vec<_>>()
+        };
+
         println!("\n=== PEER CONNECTION DIAGNOSTICS ===");
-
-        if connections.is_empty() {
-            println!("No active peer connections");
-            return;
-        }
-
-        for (addr, conn) in connections.iter() {
-            let bitfield_pieces = if let Some(ref bf) = conn.bitfield {
-                let download_state = self.download_state.lock().await;
-                (0..download_state.total_pieces)
-                    .filter(|&i| bf.has_piece(i))
-                    .count()
-            } else {
-                0
-            };
-
+        for (addr, conn, bitfield_pieces) in connection_info {
             println!("Peer {}:", addr);
             println!(
                 "  State: choking_us={}, we_interested={}, we_choking={}, they_interested={}",
