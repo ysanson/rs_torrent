@@ -8,7 +8,7 @@ pub struct Torrent {
     pub creation_date: u32,
     pub length: u32,
     pub piece_length: u32,
-    pub total_size: u32,
+    pub total_size: u64,
     pub name: String,
     pub pieces: Vec<[u8; 20]>,
     pub infohash: [u8; 20],
@@ -34,6 +34,15 @@ fn get_u32(
     }
 }
 
+fn get_u64(
+    dict: &HashMap<Vec<u8>, ValueOwned>,
+    key: &[u8],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    match dict.get(key).ok_or("Missing field")? {
+        ValueOwned::Integer(i) => Ok(*i as u64),
+        _ => Err("Expected integer field".into()),
+    }
+}
 /// Parse torrent from file path
 pub fn parse_torrent_file(file_path: &str) -> Result<Torrent, Box<dyn std::error::Error>> {
     let data = fs::read(file_path)?;
@@ -74,12 +83,12 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
         .map(|chunk| <[u8; 20]>::try_from(chunk).unwrap())
         .collect();
 
-    let total_size = if let Ok(length) = get_u32(info, b"length") {
-        length as u32
+    let total_size = if let Ok(length) = get_u64(info, b"length") {
+        length
     } else if let Some(ValueOwned::List(files)) = info.get(b"files" as &[u8]) {
-        files.iter().fold(0u32, |acc, file| {
+        files.iter().fold(0u64, |acc, file| {
             if let ValueOwned::Dictionary { entries, hash: _ } = file {
-                if let Ok(length) = get_u32(entries, b"length") {
+                if let Ok(length) = get_u64(entries, b"length") {
                     acc + length
                 } else {
                     acc

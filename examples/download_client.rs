@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Step 6: Monitor progress
+    let mut diagnostic_counter = 0;
     loop {
         let (downloaded_pieces, total_pieces) = client.get_progress().await;
         let (downloaded_blocks, total_blocks) = client.get_block_progress().await;
@@ -90,10 +91,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|(_, _, can_download)| *can_download)
             .count();
         let total_pending: usize = peer_info.iter().map(|(_, pending, _)| pending).sum();
+        let connected_peers = peer_info.len();
         println!(
-            "Peers: {} active, {} total pending requests",
-            active_peers, total_pending
+            "Peers: {} connected, {} active, {} total pending requests",
+            connected_peers, active_peers, total_pending
         );
+
+        // Show detailed diagnostics every 5 cycles (10 seconds)
+        diagnostic_counter += 1;
+        if diagnostic_counter >= 5 {
+            client.print_peer_diagnostics().await;
+            diagnostic_counter = 0;
+        }
 
         if client.is_complete().await {
             println!("\n✅ Download complete!");

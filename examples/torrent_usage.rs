@@ -145,8 +145,8 @@ fn example_4_extract_specific_info() -> Result<(), Box<dyn std::error::Error>> {
                     torrent.piece_length as f64 / 1024.0
                 );
 
-                let num_pieces =
-                    (torrent.total_size + torrent.piece_length - 1) / torrent.piece_length;
+                let num_pieces = (torrent.total_size + torrent.piece_length as u64 - 1)
+                    / torrent.piece_length as u64;
                 println!("    Estimated Pieces: {}", num_pieces);
             }
             Err(e) => {
@@ -195,7 +195,7 @@ pub fn get_torrent_size_info(file_path: &str) -> Result<SizeInfo, Box<dyn std::e
 
 #[derive(Debug)]
 pub struct SizeInfo {
-    pub bytes: u32,
+    pub bytes: u64,
     pub kilobytes: f64,
     pub megabytes: f64,
     pub gigabytes: f64,
@@ -210,7 +210,8 @@ pub fn is_valid_torrent(file_path: &str) -> bool {
 pub fn get_torrent_stats(file_path: &str) -> Result<TorrentStats, Box<dyn std::error::Error>> {
     let torrent = parse_torrent_file(file_path)?;
 
-    let estimated_pieces = (torrent.total_size + torrent.piece_length - 1) / torrent.piece_length;
+    let estimated_pieces =
+        (torrent.total_size + torrent.piece_length as u64 - 1) / torrent.piece_length as u64;
     let download_time_estimate = estimate_download_time(torrent.total_size);
 
     Ok(TorrentStats {
@@ -227,11 +228,11 @@ pub struct TorrentStats {
     pub name: String,
     pub size_mb: f64,
     pub piece_length_kb: f64,
-    pub estimated_pieces: u32,
+    pub estimated_pieces: u64,
     pub download_time_estimate: String,
 }
 
-fn estimate_download_time(size_bytes: u32) -> String {
+fn estimate_download_time(size_bytes: u64) -> String {
     // Rough estimates for different connection speeds
     let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
 
