@@ -15,6 +15,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    env_logger::builder().format_timestamp(None).init();
     // println!("Downloading torrent from {}", args.file);
     download_from_torrent_file(&args.file, &args.output_file).await?;
     Ok(())
