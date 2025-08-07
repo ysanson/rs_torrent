@@ -32,7 +32,7 @@ fn example_1_parse_from_file() -> Result<(), Box<dyn std::error::Error>> {
                 print_torrent_info(&torrent);
             }
             Err(e) => {
-                println!("✗ Error parsing torrent: {}", e);
+                println!("✗ Error parsing torrent: {e}");
             }
         }
     } else {
@@ -56,7 +56,7 @@ fn example_2_parse_from_bytes() -> Result<(), Box<dyn std::error::Error>> {
             print_torrent_info(&torrent);
         }
         Err(e) => {
-            println!("✗ Error parsing sample torrent: {}", e);
+            println!("✗ Error parsing sample torrent: {e}");
         }
     }
 
@@ -80,7 +80,7 @@ fn example_3_parse_multiple_files() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(extension) = path.extension() {
                 if extension == "torrent" {
                     let file_path = path.to_string_lossy();
-                    println!("Processing: {}", file_path);
+                    println!("Processing: {file_path}");
 
                     match parse_torrent_file(&file_path) {
                         Ok(torrent) => {
@@ -89,7 +89,7 @@ fn example_3_parse_multiple_files() -> Result<(), Box<dyn std::error::Error>> {
                             println!("  ✓ Piece length: {}", torrent.piece_length);
                         }
                         Err(e) => {
-                            println!("  ✗ Error: {}", e);
+                            println!("  ✗ Error: {e}");
                         }
                     }
                     println!();
@@ -114,7 +114,7 @@ fn example_4_extract_specific_info() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (source_type, path) in sources {
-        println!("Source: {}", source_type);
+        println!("Source: {source_type}");
 
         let result = if source_type == "File" && std::path::Path::new(path).exists() {
             parse_torrent_file(path)
@@ -145,12 +145,11 @@ fn example_4_extract_specific_info() -> Result<(), Box<dyn std::error::Error>> {
                     torrent.piece_length as f64 / 1024.0
                 );
 
-                let num_pieces = (torrent.total_size + torrent.piece_length as u64 - 1)
-                    / torrent.piece_length as u64;
-                println!("    Estimated Pieces: {}", num_pieces);
+                let num_pieces = torrent.total_size.div_ceil(torrent.piece_length as u64);
+                println!("    Estimated Pieces: {num_pieces}");
             }
             Err(e) => {
-                println!("  ✗ Error: {}", e);
+                println!("  ✗ Error: {e}");
             }
         }
         println!();
@@ -211,7 +210,7 @@ pub fn get_torrent_stats(file_path: &str) -> Result<TorrentStats, Box<dyn std::e
     let torrent = parse_torrent_file(file_path)?;
 
     let estimated_pieces =
-        (torrent.total_size + torrent.piece_length as u64 - 1) / torrent.piece_length as u64;
+        torrent.total_size.div_ceil(torrent.piece_length as u64);
     let download_time_estimate = estimate_download_time(torrent.total_size);
 
     Ok(TorrentStats {
@@ -245,10 +244,10 @@ fn estimate_download_time(size_bytes: u64) -> String {
         let time_minutes = time_seconds / 60.0;
 
         if time_minutes < 60.0 {
-            estimates.push(format!("{}: {:.1} min", label, time_minutes));
+            estimates.push(format!("{label}: {time_minutes:.1} min"));
         } else {
             let time_hours = time_minutes / 60.0;
-            estimates.push(format!("{}: {:.1} hr", label, time_hours));
+            estimates.push(format!("{label}: {time_hours:.1} hr"));
         }
     }
 

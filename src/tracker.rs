@@ -7,7 +7,7 @@ use std::{error::Error, net::Ipv4Addr};
 use url::{ParseError, Url};
 
 pub const PEER_ID: [u8; 20] = *b"f52c3727bfe8600e8923";
-const HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
+static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .user_agent("rs_torrent/0.1")
         .build()
@@ -34,7 +34,7 @@ pub fn build_completion_tracker_url(torrent: &Torrent, port: u16) -> Result<Stri
     let combined_query = if existing_query.is_empty() {
         new_params
     } else {
-        format!("{}&{}", existing_query, new_params)
+        format!("{existing_query}&{new_params}")
     };
 
     base.set_query(Some(&combined_query));
@@ -57,7 +57,7 @@ fn build_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError>
     let combined_query = if existing_query.is_empty() {
         new_params
     } else {
-        format!("{}&{}", existing_query, new_params)
+        format!("{existing_query}&{new_params}")
     };
 
     base.set_query(Some(&combined_query));
@@ -108,7 +108,7 @@ pub async fn announce_to_tracker(
         Some(ValueOwned::Integer(interval)) => interval,
         _ => return Err("Failed to extract interval".into()),
     };
-    println!("Interval is {:?}", interval);
+    println!("Interval is {interval:?}");
 
     let peers = match dict.get(b"peers" as &[u8]) {
         Some(ValueOwned::Bytes(peers)) => extract_peers(peers),

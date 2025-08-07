@@ -51,7 +51,7 @@ pub fn parse_torrent_file(file_path: &str) -> Result<Torrent, Box<dyn std::error
 
 /// Parse torrent from byte slice
 pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::Error>> {
-    let parsed = parse_owned(&data)?;
+    let parsed = parse_owned(data)?;
     let top_level = parsed.first().ok_or("Empty torrent file")?;
 
     let dict = match top_level {
