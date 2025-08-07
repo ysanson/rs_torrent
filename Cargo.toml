@@ -24,6 +24,12 @@ once_cell = "1.21.3"
 [dev-dependencies]
 assert_matches = "1.5.0"
 
+[[bin]]
+name = "rs_torrent_cli"
+path = "src/bin/cli.rs"
+doctest = false
+
+
 [[example]]
 name = "torrent_usage"
 path = "examples/torrent_usage.rs"
