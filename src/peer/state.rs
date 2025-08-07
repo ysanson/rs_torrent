@@ -421,6 +421,25 @@ mod tests {
     }
 
     #[test]
+    fn test_timed_out_block_is_retried() {
+        let mut state = DownloadState::new(1, 16384, [1u8; 20], vec![[0u8; 20]], 16384);
+        let peer_bitfield = vec![true];
+        let block_info = BlockInfo {
+            piece_index: 0,
+            offset: 0,
+            length: 16384,
+        };
+        // Mark block as requested
+        state.mark_block_requested(block_info.clone());
+        assert!(state.requested_blocks.contains(&block_info));
+        // Simulate timeout: remove from requested_blocks (as timeout handler does)
+        state.requested_blocks.remove(&block_info);
+        // Now pick_block should return the same block again
+        let picked = state.pick_block(&peer_bitfield);
+        assert_eq!(picked, Some(block_info));
+    }
+
+    #[test]
     fn test_find_next_block_in_piece() {
         let mut state = DownloadState::new(2, 32768, [1u8; 20], vec![[0u8; 20]; 2], 65536);
 

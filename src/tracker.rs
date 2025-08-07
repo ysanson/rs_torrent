@@ -6,7 +6,7 @@ use reqwest::Client;
 use std::{error::Error, net::Ipv4Addr};
 use url::{ParseError, Url};
 
-pub const PEER_ID: [u8; 20] = *b"f52c3727bfe8600e8923";
+pub const PEER_ID: [u8; 20] = *b"rs_torrentbfe8600e89";
 static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .user_agent("rs_torrent/0.1")
@@ -186,7 +186,7 @@ mod tests {
         assert!(info_hash_value.contains('%'));
 
         // Check that peer_id is encoded
-        assert!(url.contains("peer_id=f52c3727bfe8600e8923"));
+        assert!(url.contains("peer_id=rs%5Ftorrentbfe8600e89"));
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn test_peer_id_constant() {
         assert_eq!(PEER_ID.len(), 20);
-        assert_eq!(PEER_ID, *b"f52c3727bfe8600e8923");
+        assert_eq!(PEER_ID, *b"rs_torrentbfe8600e89");
     }
 
     #[test]

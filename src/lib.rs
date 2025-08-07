@@ -82,9 +82,7 @@ pub async fn download_from_torrent_file(
                         (Some(new_peers), Some(new_interval as u64))
                     }
                     Err(e) => {
-                        eprintln!(
-                            "Tracker reannounce failed: {e}, retrying in {interval}s"
-                        );
+                        eprintln!("Tracker reannounce failed: {e}, retrying in {interval}s");
                         (None, None)
                     }
                 }
@@ -149,7 +147,7 @@ pub async fn download_from_torrent_file(
             break;
         }
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(3)).await;
     }
 
     // Cancel the reannouncement task since download is complete
