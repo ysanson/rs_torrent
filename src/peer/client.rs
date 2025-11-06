@@ -13,10 +13,10 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-pub const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
+pub const PIECE_BLOCK_SIZE: usize = 32768; // 16KB blocks
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(45); // Increased for multi-peer scenarios
-const MAX_PIPELINE_DEPTH: usize = 5; // Reduced to prevent peer overload
+const MAX_PIPELINE_DEPTH: usize = 8; // Reduced to prevent peer overload
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30); // Reduced for faster recovery
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(120); // Keep-alive interval
 const BATCH_SIZE: usize = 8; // Request multiple blocks at once
