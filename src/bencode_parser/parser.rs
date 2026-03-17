@@ -160,7 +160,7 @@ impl<'a> From<Value<'a>> for ValueOwned {
 ///
 /// # Errors
 /// Returns `Err` if there was an error parsing `source`.
-pub fn parse(source: &[u8]) -> Result<Vec<Value>, Err<BencodeError<&[u8]>>> {
+pub fn parse(source: &[u8]) -> Result<Vec<Value<'_>>, Err<BencodeError<&[u8]>>> {
     let (source2, items) = many0(alt((
         Value::parse_bytes,
         Value::parse_integer,

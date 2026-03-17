@@ -375,15 +375,14 @@ impl BitTorrentClient {
             // Print diagnostics every 60 seconds for debugging (reduced frequency)
             {
                 let connections = self.connections.lock().await;
-                if let Some(conn) = connections.get(&addr) {
-                    if conn
+                if let Some(conn) = connections.get(&addr)
+                    && conn
                         .last_request_time
                         .map(|t| t.elapsed().as_secs() > 60)
                         .unwrap_or(true)
-                    {
-                        drop(connections);
-                        self.print_peer_diagnostics().await;
-                    }
+                {
+                    drop(connections);
+                    self.print_peer_diagnostics().await;
                 }
             }
 
@@ -515,10 +514,10 @@ impl BitTorrentClient {
                     ]) as usize;
 
                     let mut connections = self.connections.lock().await;
-                    if let Some(conn) = connections.get_mut(addr) {
-                        if let Some(ref mut bitfield) = conn.bitfield {
-                            bitfield.set_piece(piece_index);
-                        }
+                    if let Some(conn) = connections.get_mut(addr)
+                        && let Some(ref mut bitfield) = conn.bitfield
+                    {
+                        bitfield.set_piece(piece_index);
                     }
                     debug!("📢 Peer {addr} has piece {piece_index}");
                 }
@@ -754,28 +753,27 @@ impl BitTorrentClient {
 
             perf_cache.clear();
 
-            if let Some(conn) = connections.get(addr) {
-                if let Some(ref bitfield) = conn.bitfield {
-                    // Reuse the buffer instead of allocating
-                    perf_cache
-                        .bitfield_buffer
-                        .extend((0..download_state.total_pieces).map(|i| bitfield.has_piece(i)));
+            if let Some(conn) = connections.get(addr)
+                && let Some(ref bitfield) = conn.bitfield
+            {
+                // Reuse the buffer instead of allocating
+                perf_cache
+                    .bitfield_buffer
+                    .extend((0..download_state.total_pieces).map(|i| bitfield.has_piece(i)));
 
-                    // Get current pipeline depth to check capacity efficiently
-                    let current_pending = conn.pending_requests.len();
-                    let available_slots = MAX_PIPELINE_DEPTH.saturating_sub(current_pending);
-                    let max_blocks = std::cmp::min(BATCH_SIZE, available_slots);
+                // Get current pipeline depth to check capacity efficiently
+                let current_pending = conn.pending_requests.len();
+                let available_slots = MAX_PIPELINE_DEPTH.saturating_sub(current_pending);
+                let max_blocks = std::cmp::min(BATCH_SIZE, available_slots);
 
-                    // Batch multiple block picks to reduce lock acquisitions
-                    for _ in 0..max_blocks {
-                        if let Some(block_info) =
-                            download_state.pick_block(&perf_cache.bitfield_buffer)
-                        {
-                            download_state.mark_block_requested(block_info.clone());
-                            perf_cache.block_batch.push(block_info);
-                        } else {
-                            break;
-                        }
+                // Batch multiple block picks to reduce lock acquisitions
+                for _ in 0..max_blocks {
+                    if let Some(block_info) = download_state.pick_block(&perf_cache.bitfield_buffer)
+                    {
+                        download_state.mark_block_requested(block_info.clone());
+                        perf_cache.block_batch.push(block_info);
+                    } else {
+                        break;
                     }
                 }
             }

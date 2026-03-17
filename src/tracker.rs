@@ -77,7 +77,7 @@ pub async fn contact_tracker(tracker_url: &str) -> Result<Vec<u8>, Box<dyn Error
 
 fn extract_peers(bytes: &[u8]) -> Option<Vec<Peer>> {
     let peer_size: usize = 6;
-    if bytes.len() % peer_size != 0 {
+    if !bytes.len().is_multiple_of(peer_size) {
         return None;
     }
     let peers = bytes
