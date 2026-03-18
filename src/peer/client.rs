@@ -13,13 +13,13 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-pub const PIECE_BLOCK_SIZE: usize = 32768; // 16KB blocks
+pub const PIECE_BLOCK_SIZE: usize = 16384;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(45);
-const MAX_PIPELINE_DEPTH: usize = 8;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PIPELINE_DEPTH: usize = 10;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(120);
-const BATCH_SIZE: usize = 8; // Request multiple blocks at once
+const BATCH_SIZE: usize = 16;
 
 /// Represents the state of a connection to a peer
 #[derive(Debug, Clone)]
@@ -406,14 +406,14 @@ impl BitTorrentClient {
         {
             let mut download_state = self.download_state.lock().await;
             let mut connections = self.connections.lock().await;
-            
+
             // Remove any pending requests from download state before removing connection
             if let Some(conn) = connections.get(&addr) {
                 for block_info in conn.pending_requests.keys() {
                     download_state.requested_blocks.remove(block_info);
                 }
             }
-            
+
             connections.remove(&addr);
         }
         debug!("🔌 Disconnected from peer {addr}");
@@ -816,20 +816,24 @@ impl BitTorrentClient {
                 break; // Stop on first error
             }
         }
-        
+
         // Clean up failed requests from both pending_requests and requested_blocks
         if !failed_blocks.is_empty() {
             let mut download_state = self.download_state.lock().await;
             let mut connections = self.connections.lock().await;
-            
+
             if let Some(conn) = connections.get_mut(addr) {
                 for block_info in &failed_blocks {
                     conn.pending_requests.remove(block_info);
                     download_state.requested_blocks.remove(block_info);
                 }
             }
-            
-            debug!("⚠️ Failed to send {} block requests to peer {}", failed_blocks.len(), addr);
+
+            debug!(
+                "⚠️ Failed to send {} block requests to peer {}",
+                failed_blocks.len(),
+                addr
+            );
         }
 
         // Update stats once for the entire batch
@@ -1019,14 +1023,20 @@ impl BitTorrentClient {
             if connections.is_empty() {
                 debug!("\n=== PEER CONNECTION DIAGNOSTICS ===");
                 debug!("No active peer connections");
-                debug!("Requested blocks in download state: {}", download_state.requested_blocks.len());
+                debug!(
+                    "Requested blocks in download state: {}",
+                    download_state.requested_blocks.len()
+                );
                 return;
             }
 
             let total_pieces = download_state.total_pieces;
             let requested_blocks_count = download_state.requested_blocks.len();
-            let total_pending: usize = connections.iter().map(|(_, conn)| conn.pending_requests.len()).sum();
-            
+            let total_pending: usize = connections
+                .iter()
+                .map(|(_, conn)| conn.pending_requests.len())
+                .sum();
+
             let info = connections
                 .iter()
                 .map(|(addr, conn)| {
@@ -1038,14 +1048,17 @@ impl BitTorrentClient {
                     (*addr, conn.clone(), bitfield_pieces)
                 })
                 .collect::<Vec<_>>();
-            
+
             (info, requested_blocks_count, total_pending)
         };
 
         debug!("\n=== PEER CONNECTION DIAGNOSTICS ===");
-        debug!("Total requested blocks in download state: {}", requested_blocks_count);
+        debug!(
+            "Total requested blocks in download state: {}",
+            requested_blocks_count
+        );
         debug!("Total pending requests across all peers: {}", total_pending);
-        
+
         for (addr, conn, bitfield_pieces) in connection_info {
             debug!(
                 "Peer {}:
