@@ -1,4 +1,6 @@
-use std::{collections::HashMap, fs};
+use std::fs;
+
+use rustc_hash::FxHashMap;
 
 use crate::bencode_parser::parser::{ValueOwned, parse_owned};
 
@@ -15,7 +17,7 @@ pub struct Torrent {
 }
 
 fn get_string(
-    dict: &HashMap<Vec<u8>, ValueOwned>,
+    dict: &FxHashMap<Vec<u8>, ValueOwned>,
     key: &[u8],
 ) -> Result<String, Box<dyn std::error::Error>> {
     match dict.get(key).ok_or("Missing field")? {
@@ -25,7 +27,7 @@ fn get_string(
 }
 
 fn get_u32(
-    dict: &HashMap<Vec<u8>, ValueOwned>,
+    dict: &FxHashMap<Vec<u8>, ValueOwned>,
     key: &[u8],
 ) -> Result<u32, Box<dyn std::error::Error>> {
     match dict.get(key).ok_or("Missing field")? {
@@ -35,7 +37,7 @@ fn get_u32(
 }
 
 fn get_u64(
-    dict: &HashMap<Vec<u8>, ValueOwned>,
+    dict: &FxHashMap<Vec<u8>, ValueOwned>,
     key: &[u8],
 ) -> Result<u64, Box<dyn std::error::Error>> {
     match dict.get(key).ok_or("Missing field")? {

@@ -1,5 +1,6 @@
+use rustc_hash::FxHashMap;
 use sha1::{Digest, Sha1};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
@@ -21,7 +22,7 @@ pub struct DownloadState {
     pub info_hash: [u8; 20],
     pub pieces: Vec<Option<Vec<u8>>>, // `None` = not downloaded, `Some(data)` = done
     pub requested: HashSet<usize>,    // Which pieces are currently being downloaded
-    pub piece_blocks: HashMap<usize, Vec<Option<Vec<u8>>>>, // Blocks within each piece
+    pub piece_blocks: FxHashMap<usize, Vec<Option<Vec<u8>>>>, // Blocks within each piece
     pub requested_blocks: HashSet<BlockInfo>, // Which blocks are currently being requested
     pub pieces_hash: Vec<[u8; 20]>,   // SHA1 hashes for each piece
     pub total_size: u64,              // Total size of all data
@@ -41,7 +42,7 @@ impl DownloadState {
             info_hash,
             pieces: vec![None; total_pieces],
             requested: HashSet::new(),
-            piece_blocks: HashMap::new(),
+            piece_blocks: FxHashMap::default(),
             requested_blocks: HashSet::new(),
             pieces_hash,
             total_size,

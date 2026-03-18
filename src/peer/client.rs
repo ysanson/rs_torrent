@@ -4,7 +4,7 @@ use crate::peer::message::{Bitfield, Message, MessageId};
 use crate::peer::state::{BlockInfo, DownloadState};
 
 use log::{debug, error};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,10 +15,10 @@ use tokio::time::timeout;
 
 pub const PIECE_BLOCK_SIZE: usize = 32768; // 16KB blocks
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(45); // Increased for multi-peer scenarios
-const MAX_PIPELINE_DEPTH: usize = 8; // Reduced to prevent peer overload
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30); // Reduced for faster recovery
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(120); // Keep-alive interval
+const READ_TIMEOUT: Duration = Duration::from_secs(45);
+const MAX_PIPELINE_DEPTH: usize = 8;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const BATCH_SIZE: usize = 8; // Request multiple blocks at once
 
 /// Represents the state of a connection to a peer
@@ -30,7 +30,7 @@ pub struct PeerConnection {
     pub peer_choking: bool,
     pub peer_interested: bool,
     pub bitfield: Option<Bitfield>,
-    pub pending_requests: HashMap<BlockInfo, std::time::Instant>, // Blocks we've requested with timestamps
+    pub pending_requests: FxHashMap<BlockInfo, std::time::Instant>, // Blocks we've requested with timestamps
     pub last_request_time: Option<std::time::Instant>,
 }
 
@@ -43,7 +43,7 @@ impl PeerConnection {
             peer_choking: true,
             peer_interested: false,
             bitfield: None,
-            pending_requests: HashMap::new(),
+            pending_requests: FxHashMap::default(),
             last_request_time: None,
         }
     }
@@ -135,7 +135,7 @@ impl PerformanceCache {
 #[derive(Debug)]
 pub struct IndexedConnections {
     connections: Vec<Option<PeerConnection>>,
-    addr_to_index: HashMap<SocketAddr, usize>,
+    addr_to_index: FxHashMap<SocketAddr, usize>,
     free_indices: Vec<usize>,
 }
 
@@ -149,7 +149,7 @@ impl IndexedConnections {
     pub fn new() -> Self {
         Self {
             connections: Vec::new(),
-            addr_to_index: HashMap::new(),
+            addr_to_index: FxHashMap::default(),
             free_indices: Vec::new(),
         }
     }
@@ -402,9 +402,18 @@ impl BitTorrentClient {
             }
         }
 
-        // Clean up connection
+        // Clean up connection and any pending requests
         {
+            let mut download_state = self.download_state.lock().await;
             let mut connections = self.connections.lock().await;
+            
+            // Remove any pending requests from download state before removing connection
+            if let Some(conn) = connections.get(&addr) {
+                for block_info in conn.pending_requests.keys() {
+                    download_state.requested_blocks.remove(block_info);
+                }
+            }
+            
             connections.remove(&addr);
         }
         debug!("🔌 Disconnected from peer {addr}");
@@ -797,12 +806,30 @@ impl BitTorrentClient {
 
         // Send all requests without holding locks
         let mut requests_sent = 0;
-        for block_info in blocks_to_request {
-            if self.request_block(stream, block_info).await.is_ok() {
+        let mut failed_blocks = Vec::new();
+        for block_info in &blocks_to_request {
+            if self.request_block(stream, block_info.clone()).await.is_ok() {
                 requests_sent += 1;
             } else {
+                // Collect remaining blocks that weren't sent
+                failed_blocks.extend(blocks_to_request[requests_sent..].iter().cloned());
                 break; // Stop on first error
             }
+        }
+        
+        // Clean up failed requests from both pending_requests and requested_blocks
+        if !failed_blocks.is_empty() {
+            let mut download_state = self.download_state.lock().await;
+            let mut connections = self.connections.lock().await;
+            
+            if let Some(conn) = connections.get_mut(addr) {
+                for block_info in &failed_blocks {
+                    conn.pending_requests.remove(block_info);
+                    download_state.requested_blocks.remove(block_info);
+                }
+            }
+            
+            debug!("⚠️ Failed to send {} block requests to peer {}", failed_blocks.len(), addr);
         }
 
         // Update stats once for the entire batch
@@ -985,18 +1012,22 @@ impl BitTorrentClient {
     /// Print diagnostic information about all peer connections
     pub async fn print_peer_diagnostics(&self) {
         // CONSISTENT LOCK ORDER: download_state first, then connections
-        let connection_info = {
+        let (connection_info, requested_blocks_count, total_pending) = {
             let download_state = self.download_state.lock().await;
             let connections = self.connections.lock().await;
 
             if connections.is_empty() {
                 debug!("\n=== PEER CONNECTION DIAGNOSTICS ===");
                 debug!("No active peer connections");
+                debug!("Requested blocks in download state: {}", download_state.requested_blocks.len());
                 return;
             }
 
             let total_pieces = download_state.total_pieces;
-            connections
+            let requested_blocks_count = download_state.requested_blocks.len();
+            let total_pending: usize = connections.iter().map(|(_, conn)| conn.pending_requests.len()).sum();
+            
+            let info = connections
                 .iter()
                 .map(|(addr, conn)| {
                     let bitfield_pieces = if let Some(ref bf) = conn.bitfield {
@@ -1006,10 +1037,15 @@ impl BitTorrentClient {
                     };
                     (*addr, conn.clone(), bitfield_pieces)
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            
+            (info, requested_blocks_count, total_pending)
         };
 
         debug!("\n=== PEER CONNECTION DIAGNOSTICS ===");
+        debug!("Total requested blocks in download state: {}", requested_blocks_count);
+        debug!("Total pending requests across all peers: {}", total_pending);
+        
         for (addr, conn, bitfield_pieces) in connection_info {
             debug!(
                 "Peer {}:

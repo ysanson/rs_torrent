@@ -10,6 +10,8 @@ struct Args {
     file: String,
     #[arg(short, long)]
     output_file: String,
+    #[arg(short, long, default_value_t = 8)]
+    queue_depth: usize,
 }
 
 #[tokio::main]

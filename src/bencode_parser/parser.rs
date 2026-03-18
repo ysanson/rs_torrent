@@ -8,8 +8,9 @@ use nom::{
     multi::{many_till, many0},
     sequence::{delimited, pair, preceded},
 };
+use rustc_hash::FxHashMap;
 use sha1::{Digest, Sha1};
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 
 pub use nom::Err;
 
@@ -22,7 +23,7 @@ pub enum Value<'a> {
     Integer(i64),
     List(Vec<Self>),
     Dictionary {
-        entries: HashMap<&'a [u8], Self>,
+        entries: FxHashMap<&'a [u8], Self>,
         hash: [u8; 20],
     },
 }
@@ -116,7 +117,7 @@ impl<'a> Value<'a> {
             }
         });
 
-        let entries: HashMap<&[u8], Value<'a>> = data.collect();
+        let entries: FxHashMap<&[u8], Value<'a>> = data.collect();
         let parsed_len = input.len() - inp.len();
         let raw_slice = &input[..parsed_len];
         let hash: [u8; 20] = Sha1::digest(raw_slice).into();
@@ -131,7 +132,7 @@ pub enum ValueOwned {
     Integer(i64),
     List(Vec<ValueOwned>),
     Dictionary {
-        entries: HashMap<Vec<u8>, Self>,
+        entries: FxHashMap<Vec<u8>, Self>,
         hash: [u8; 20],
     },
 }
