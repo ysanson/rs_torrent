@@ -89,7 +89,7 @@ impl Bitfield {
     }
 
     pub fn from_piece_count(count: usize) -> Self {
-        let num_bytes = (count + 7) / 8;
+        let num_bytes = count.div_ceil(8);
         Bitfield {
             bits: vec![0; num_bytes],
         }

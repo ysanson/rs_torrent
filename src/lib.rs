@@ -27,7 +27,7 @@ pub async fn download_from_torrent_file(
     file_path: &str,
     output_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let torrent = parse_torrent_file(&file_path)?;
+    let torrent = parse_torrent_file(file_path)?;
     let download_state = DownloadState::new(
         torrent.pieces.len(),
         torrent.piece_length,
@@ -70,8 +70,7 @@ pub async fn download_from_torrent_file(
                     Ok((new_interval, new_peers)) => {
                         if new_peers.is_empty() {
                             println!(
-                                "📢 Tracker reannounce: no new peers, next in {}s",
-                                new_interval
+                                "📢 Tracker reannounce: no new peers, next in {new_interval}s"
                             );
                         } else {
                             println!(
@@ -83,10 +82,7 @@ pub async fn download_from_torrent_file(
                         (Some(new_peers), Some(new_interval as u64))
                     }
                     Err(e) => {
-                        eprintln!(
-                            "Tracker reannounce failed: {}, retrying in {}s",
-                            e, interval
-                        );
+                        eprintln!("Tracker reannounce failed: {e}, retrying in {interval}s");
                         (None, None)
                     }
                 }
@@ -115,13 +111,7 @@ pub async fn download_from_torrent_file(
         let block_progress = (downloaded_blocks as f64 / total_blocks as f64) * 100.0;
 
         println!(
-            "Progress: {}/{} pieces ({:.1}%) | {}/{} blocks ({:.1}%)",
-            downloaded_pieces,
-            total_pieces,
-            piece_progress,
-            downloaded_blocks,
-            total_blocks,
-            block_progress
+            "Progress: {downloaded_pieces}/{total_pieces} pieces ({piece_progress:.1}%) | {downloaded_blocks}/{total_blocks} blocks ({block_progress:.1}%)"
         );
 
         // Show pipelining statistics
@@ -141,8 +131,7 @@ pub async fn download_from_torrent_file(
         let total_peers = peer_info.len();
         let total_pending: usize = peer_info.iter().map(|(_, pending, _)| pending).sum();
         println!(
-            "Peers: {}/{} active, {} total pending requests",
-            active_peers, total_peers, total_pending
+            "Peers: {active_peers}/{total_peers} active, {total_pending} total pending requests"
         );
 
         if client.is_complete().await {
@@ -152,13 +141,13 @@ pub async fn download_from_torrent_file(
             println!("📢 Announcing completion to tracker...");
             match announce_completion_to_tracker(&torrent, 6881).await {
                 Ok(_) => println!("✅ Completion announced to tracker"),
-                Err(e) => eprintln!("Failed to announce completion: {}", e),
+                Err(e) => eprintln!("Failed to announce completion: {e}"),
             }
 
             break;
         }
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(3)).await;
     }
 
     // Cancel the reannouncement task since download is complete

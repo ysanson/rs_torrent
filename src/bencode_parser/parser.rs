@@ -8,8 +8,9 @@ use nom::{
     multi::{many_till, many0},
     sequence::{delimited, pair, preceded},
 };
+use rustc_hash::FxHashMap;
 use sha1::{Digest, Sha1};
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 
 pub use nom::Err;
 
@@ -22,7 +23,7 @@ pub enum Value<'a> {
     Integer(i64),
     List(Vec<Self>),
     Dictionary {
-        entries: HashMap<&'a [u8], Self>,
+        entries: FxHashMap<&'a [u8], Self>,
         hash: [u8; 20],
     },
 }
@@ -116,18 +117,12 @@ impl<'a> Value<'a> {
             }
         });
 
-        let entries: HashMap<&[u8], Value<'a>> = data.collect();
+        let entries: FxHashMap<&[u8], Value<'a>> = data.collect();
         let parsed_len = input.len() - inp.len();
         let raw_slice = &input[..parsed_len];
         let hash: [u8; 20] = Sha1::digest(raw_slice).into();
 
-        Ok((
-            inp,
-            Value::Dictionary {
-                entries: entries,
-                hash: hash,
-            },
-        ))
+        Ok((inp, Value::Dictionary { entries, hash }))
     }
 }
 
@@ -137,7 +132,7 @@ pub enum ValueOwned {
     Integer(i64),
     List(Vec<ValueOwned>),
     Dictionary {
-        entries: HashMap<Vec<u8>, Self>,
+        entries: FxHashMap<Vec<u8>, Self>,
         hash: [u8; 20],
     },
 }
@@ -166,7 +161,7 @@ impl<'a> From<Value<'a>> for ValueOwned {
 ///
 /// # Errors
 /// Returns `Err` if there was an error parsing `source`.
-pub fn parse(source: &[u8]) -> Result<Vec<Value>, Err<BencodeError<&[u8]>>> {
+pub fn parse(source: &[u8]) -> Result<Vec<Value<'_>>, Err<BencodeError<&[u8]>>> {
     let (source2, items) = many0(alt((
         Value::parse_bytes,
         Value::parse_integer,

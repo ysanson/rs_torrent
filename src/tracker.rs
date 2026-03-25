@@ -6,8 +6,8 @@ use reqwest::Client;
 use std::{error::Error, net::Ipv4Addr};
 use url::{ParseError, Url};
 
-pub const PEER_ID: [u8; 20] = *b"f52c3727bfe8600e8923";
-const HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
+pub const PEER_ID: [u8; 20] = *b"rs_torrentbfe8600e89";
+static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .user_agent("rs_torrent/0.1")
         .build()
@@ -34,7 +34,7 @@ pub fn build_completion_tracker_url(torrent: &Torrent, port: u16) -> Result<Stri
     let combined_query = if existing_query.is_empty() {
         new_params
     } else {
-        format!("{}&{}", existing_query, new_params)
+        format!("{existing_query}&{new_params}")
     };
 
     base.set_query(Some(&combined_query));
@@ -57,7 +57,7 @@ fn build_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError>
     let combined_query = if existing_query.is_empty() {
         new_params
     } else {
-        format!("{}&{}", existing_query, new_params)
+        format!("{existing_query}&{new_params}")
     };
 
     base.set_query(Some(&combined_query));
@@ -77,7 +77,7 @@ pub async fn contact_tracker(tracker_url: &str) -> Result<Vec<u8>, Box<dyn Error
 
 fn extract_peers(bytes: &[u8]) -> Option<Vec<Peer>> {
     let peer_size: usize = 6;
-    if bytes.len() % peer_size != 0 {
+    if !bytes.len().is_multiple_of(peer_size) {
         return None;
     }
     let peers = bytes
@@ -108,7 +108,7 @@ pub async fn announce_to_tracker(
         Some(ValueOwned::Integer(interval)) => interval,
         _ => return Err("Failed to extract interval".into()),
     };
-    println!("Interval is {:?}", interval);
+    println!("Interval is {interval:?}");
 
     let peers = match dict.get(b"peers" as &[u8]) {
         Some(ValueOwned::Bytes(peers)) => extract_peers(peers),
@@ -186,7 +186,7 @@ mod tests {
         assert!(info_hash_value.contains('%'));
 
         // Check that peer_id is encoded
-        assert!(url.contains("peer_id=f52c3727bfe8600e8923"));
+        assert!(url.contains("peer_id=rs%5Ftorrentbfe8600e89"));
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn test_peer_id_constant() {
         assert_eq!(PEER_ID.len(), 20);
-        assert_eq!(PEER_ID, *b"f52c3727bfe8600e8923");
+        assert_eq!(PEER_ID, *b"rs_torrentbfe8600e89");
     }
 
     #[test]

@@ -1,5 +1,6 @@
+use rustc_hash::FxHashMap;
 use sha1::{Digest, Sha1};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
@@ -21,7 +22,7 @@ pub struct DownloadState {
     pub info_hash: [u8; 20],
     pub pieces: Vec<Option<Vec<u8>>>, // `None` = not downloaded, `Some(data)` = done
     pub requested: HashSet<usize>,    // Which pieces are currently being downloaded
-    pub piece_blocks: HashMap<usize, Vec<Option<Vec<u8>>>>, // Blocks within each piece
+    pub piece_blocks: FxHashMap<usize, Vec<Option<Vec<u8>>>>, // Blocks within each piece
     pub requested_blocks: HashSet<BlockInfo>, // Which blocks are currently being requested
     pub pieces_hash: Vec<[u8; 20]>,   // SHA1 hashes for each piece
     pub total_size: u64,              // Total size of all data
@@ -41,7 +42,7 @@ impl DownloadState {
             info_hash,
             pieces: vec![None; total_pieces],
             requested: HashSet::new(),
-            piece_blocks: HashMap::new(),
+            piece_blocks: FxHashMap::default(),
             requested_blocks: HashSet::new(),
             pieces_hash,
             total_size,
@@ -90,7 +91,7 @@ impl DownloadState {
     /// Get number of blocks in a piece
     fn get_blocks_in_piece(&self, piece_index: usize) -> usize {
         let actual_piece_length = self.get_actual_piece_length(piece_index);
-        (actual_piece_length + PIECE_BLOCK_SIZE - 1) / PIECE_BLOCK_SIZE
+        actual_piece_length.div_ceil(PIECE_BLOCK_SIZE)
     }
 
     /// Get the length of a specific block
@@ -160,10 +161,8 @@ impl DownloadState {
                 if piece_blocks.iter().all(|block| block.is_some()) {
                     // Combine all blocks into complete piece
                     let mut complete_piece = Vec::new();
-                    for block in piece_blocks.iter() {
-                        if let Some(block_data) = block {
-                            complete_piece.extend_from_slice(block_data);
-                        }
+                    for block in piece_blocks.iter().flatten() {
+                        complete_piece.extend_from_slice(block);
                     }
 
                     // Verify SHA1 hash
@@ -216,7 +215,7 @@ impl DownloadState {
         } else if self
             .pieces
             .get(piece_index)
-            .map_or(false, |piece| piece.is_some())
+            .is_some_and(|piece| piece.is_some())
         {
             1.0 // Complete
         } else {
@@ -244,7 +243,7 @@ impl DownloadState {
 
         // Count partial pieces
         for (piece_index, blocks) in &self.piece_blocks {
-            if self.pieces.get(*piece_index).map_or(false, |p| p.is_none()) {
+            if self.pieces.get(*piece_index).is_some_and(|p| p.is_none()) {
                 completed += blocks.iter().filter(|block| block.is_some()).count();
             }
         }
@@ -258,7 +257,7 @@ impl DownloadState {
         for (i, piece) in self.pieces.iter().enumerate() {
             match piece {
                 Some(data) => file.write_all(data).await?,
-                None => return Err(format!("Piece {} is missing", i).into()),
+                None => return Err(format!("Piece {i} is missing").into()),
             }
         }
 
@@ -423,6 +422,25 @@ mod tests {
     }
 
     #[test]
+    fn test_timed_out_block_is_retried() {
+        let mut state = DownloadState::new(1, 16384, [1u8; 20], vec![[0u8; 20]], 16384);
+        let peer_bitfield = vec![true];
+        let block_info = BlockInfo {
+            piece_index: 0,
+            offset: 0,
+            length: 16384,
+        };
+        // Mark block as requested
+        state.mark_block_requested(block_info.clone());
+        assert!(state.requested_blocks.contains(&block_info));
+        // Simulate timeout: remove from requested_blocks (as timeout handler does)
+        state.requested_blocks.remove(&block_info);
+        // Now pick_block should return the same block again
+        let picked = state.pick_block(&peer_bitfield);
+        assert_eq!(picked, Some(block_info));
+    }
+
+    #[test]
     fn test_find_next_block_in_piece() {
         let mut state = DownloadState::new(2, 32768, [1u8; 20], vec![[0u8; 20]; 2], 65536);
 
@@ -487,7 +505,7 @@ mod tests {
         // Complete the block with correct data
         let result = state.complete_block(block_info, test_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true); // Piece should be complete and verified
+        assert!(result.unwrap()); // Piece should be complete and verified
         assert_eq!(state.progress(), 1);
     }
 
@@ -538,7 +556,7 @@ mod tests {
         };
         let result = state.complete_block(block1_info, block1_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false); // Piece not complete yet
+        assert!(!result.unwrap()); // Piece not complete yet
         assert_eq!(state.progress(), 0);
 
         // Complete second block
@@ -549,7 +567,7 @@ mod tests {
         };
         let result = state.complete_block(block2_info, block2_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true); // Piece should be complete and verified
+        assert!(result.unwrap()); // Piece should be complete and verified
         assert_eq!(state.progress(), 1);
     }
 
@@ -614,7 +632,7 @@ mod tests {
         };
         let result = state.complete_block(block1_info, block1_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false); // Piece not complete yet
+        assert!(!result.unwrap()); // Piece not complete yet
 
         // Complete second block (partial) of last piece
         let block2_info = BlockInfo {
@@ -624,7 +642,7 @@ mod tests {
         };
         let result = state.complete_block(block2_info, block2_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true); // Piece should be complete and verified
+        assert!(result.unwrap()); // Piece should be complete and verified
     }
 
     #[test]
@@ -656,6 +674,6 @@ mod tests {
         };
         let result = state.complete_block(block_info, test_data);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true); // Piece should be complete and verified
+        assert!(result.unwrap()); // Piece should be complete and verified
     }
 }

@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Torrent loaded: {}", torrent.name);
     println!("Total pieces: {}", torrent.pieces.len());
     println!("Piece length: {} bytes", torrent.piece_length);
-    println!("Block size: {} bytes", PIECE_BLOCK_SIZE);
+    println!("Block size: {PIECE_BLOCK_SIZE} bytes");
     println!("Total size: {} bytes\n", torrent.total_size);
 
     // Step 2: Create download state
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_clone = client.clone();
     let download_handle = tokio::spawn(async move {
         if let Err(e) = client_clone.start_download(peers).await {
-            eprintln!("Download error: {}", e);
+            eprintln!("Download error: {e}");
         }
     });
 
@@ -67,13 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let block_progress = (downloaded_blocks as f64 / total_blocks as f64) * 100.0;
 
         println!(
-            "Progress: {}/{} pieces ({:.1}%) | {}/{} blocks ({:.1}%)",
-            downloaded_pieces,
-            total_pieces,
-            piece_progress,
-            downloaded_blocks,
-            total_blocks,
-            block_progress
+            "Progress: {downloaded_pieces}/{total_pieces} pieces ({piece_progress:.1}%) | {downloaded_blocks}/{total_blocks} blocks ({block_progress:.1}%)"
         );
 
         // Show pipelining statistics
@@ -93,8 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let total_pending: usize = peer_info.iter().map(|(_, pending, _)| pending).sum();
         let connected_peers = peer_info.len();
         println!(
-            "Peers: {} connected, {} active, {} total pending requests",
-            connected_peers, active_peers, total_pending
+            "Peers: {connected_peers} connected, {active_peers} active, {total_pending} total pending requests"
         );
 
         // Show detailed diagnostics every 5 cycles (10 seconds)

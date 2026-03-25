@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     torrent.total_size as f64 / (1024.0 * 1024.0)
                 );
             }
-            Err(e) => println!("  ❌ Error: {}", e),
+            Err(e) => println!("  ❌ Error: {e}"),
         }
     } else {
         println!("  ⚠️  Test file not found");
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  📄 Name: {}", torrent.name);
                 println!("  🧩 Pieces: {} KB each", torrent.piece_length / 1024);
             }
-            Err(e) => println!("  ❌ Error: {}", e),
+            Err(e) => println!("  ❌ Error: {e}"),
         }
     }
 
@@ -52,12 +52,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::path::Path::new(file_path).exists() {
         // Just get the name
         if let Ok(name) = get_torrent_name(file_path) {
-            println!("  📄 Quick name lookup: {}", name);
+            println!("  📄 Quick name lookup: {name}");
         }
 
         // Just get the announce URL
         if let Ok(announce) = get_announce_url(file_path) {
-            println!("  🔗 Quick tracker lookup: {}", announce);
+            println!("  🔗 Quick tracker lookup: {announce}");
         }
 
         // Check if file is valid
@@ -73,10 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match parse_torrent_file("nonexistent.torrent") {
         Ok(torrent) => {
-            println!("  This shouldn't happen: {:?}", torrent);
+            println!("  This shouldn't happen: {torrent:?}");
         }
         Err(e) => {
-            println!("  ✅ Properly caught error: {}", e);
+            println!("  ✅ Properly caught error: {e}");
             println!("  💡 Always handle errors when parsing dynamic files!");
         }
     }
@@ -125,11 +125,11 @@ fn extract_all_info(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let size_mb = torrent.total_size as f64 / (1024.0 * 1024.0);
     let piece_size_kb = torrent.piece_length as f64 / 1024.0;
     let estimated_pieces =
-        (torrent.total_size + torrent.piece_length as u64 - 1) / torrent.piece_length as u64;
+        torrent.total_size.div_ceil(torrent.piece_length as u64);
 
-    println!("  Size (MB): {:.2}", size_mb);
-    println!("  Piece Size (KB): {:.1}", piece_size_kb);
-    println!("  Estimated Pieces: {}", estimated_pieces);
+    println!("  Size (MB): {size_mb:.2}");
+    println!("  Piece Size (KB): {piece_size_kb:.1}");
+    println!("  Estimated Pieces: {estimated_pieces}");
 
     Ok(())
 }

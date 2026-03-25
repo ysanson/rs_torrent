@@ -10,11 +10,14 @@ struct Args {
     file: String,
     #[arg(short, long)]
     output_file: String,
+    #[arg(short, long, default_value_t = 8)]
+    queue_depth: usize,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    env_logger::builder().format_timestamp(None).init();
     // println!("Downloading torrent from {}", args.file);
     download_from_torrent_file(&args.file, &args.output_file).await?;
     Ok(())
