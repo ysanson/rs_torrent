@@ -1,5 +1,6 @@
 use std::fs;
 
+use hex::FromHex;
 use rustc_hash::FxHashMap;
 use url::Url;
 
@@ -126,30 +127,134 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
 
 pub fn parse_magnet_link(magnet: &str) -> Result<Magnet, Box<dyn std::error::Error>> {
     let url = Url::parse(magnet)?;
-    let params: FxHashMap<String, String> = url.query_pairs().into_owned().collect();
-    let infohash_hex = params
-        .get("xt")
-        .and_then(|xt| xt.strip_prefix("urn:btih:"))
-        .ok_or("Missing 'xt' parameter")?;
+    let mut infohash: Option<[u8; 20]> = None;
+    let mut trackers = Vec::new();
+    let mut display_name = None;
+    let mut file_size = None;
 
-    let infohash: [u8; 20] = infohash_hex
-        .as_bytes()
-        .try_into()
-        .map_err(|_| "Invalid infohash length. Expected 20 bytes.")?;
-
-    let trackers = params
-        .get("tr")
-        .map(|tr| tr.split('&').map(|s| s.to_string()).collect())
-        .unwrap_or_default();
-    let display_name = params.get("dn").map(|dn| dn.to_string());
-
-    // Extract file size
-    let file_size: Option<u64> = params.get("xl").map(|xl| xl.parse().ok()).flatten();
+    // Process query parameters directly
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "xt" => {
+                if let Some(hex) = value.strip_prefix("urn:btih:") {
+                    infohash = <[u8; 20]>::from_hex(hex).ok();
+                }
+            }
+            "tr" => {
+                trackers.push(value.into_owned());
+            }
+            "dn" => {
+                display_name = Some(value.into_owned());
+            }
+            "xl" => {
+                if let Ok(size) = value.parse() {
+                    file_size = Some(size);
+                }
+            }
+            _ => {}
+        }
+    }
 
     Ok(Magnet {
-        infohash,
+        infohash: infohash.ok_or("Missing 'xt' parameter or invalid infohash format")?,
         display_name,
         trackers,
         file_size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_magnet_link_valid() {
+        let magnet_link = "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678&dn=Example+Torrent&tr=http://tracker.example.com/announce&xl=1024";
+        let result = parse_magnet_link(magnet_link);
+        assert!(result.is_ok());
+
+        let magnet = result.unwrap();
+        assert_eq!(
+            magnet.infohash,
+            [
+                0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
+                0xcd, 0xef, 0x12, 0x34, 0x56, 0x78
+            ]
+        );
+        assert_eq!(magnet.display_name, Some("Example Torrent".to_string()));
+        assert_eq!(
+            magnet.trackers,
+            vec!["http://tracker.example.com/announce".to_string()]
+        );
+        assert_eq!(magnet.file_size, Some(1024));
+    }
+
+    #[test]
+    fn test_parse_magnet_link_missing_xt() {
+        let magnet_link =
+            "magnet:?dn=Example+Torrent&tr=http://tracker.example.com/announce&xl=1024";
+        let result = parse_magnet_link(magnet_link);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Missing 'xt' parameter or invalid infohash format"
+        );
+    }
+
+    #[test]
+    fn test_parse_magnet_link_invalid_infohash_length() {
+        let magnet_link = "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef1234567&dn=Example+Torrent&tr=http://tracker.example.com/announce&xl=1024";
+        let result = parse_magnet_link(magnet_link);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Missing 'xt' parameter or invalid infohash format"
+        );
+    }
+
+    #[test]
+    fn test_parse_magnet_link_missing_optional_params() {
+        let magnet_link = "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678";
+        let result = parse_magnet_link(magnet_link);
+        assert!(result.is_ok());
+
+        let magnet = result.unwrap();
+        assert_eq!(
+            magnet.infohash,
+            [
+                0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
+                0xcd, 0xef, 0x12, 0x34, 0x56, 0x78
+            ]
+        );
+        assert_eq!(magnet.display_name, None);
+        assert_eq!(magnet.trackers, Vec::<String>::new());
+        assert_eq!(magnet.file_size, None);
+    }
+
+    #[test]
+    fn test_parse_magnet_link_multiple_trackers() {
+        let magnet_link = "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678&tr=http://tracker1.example.com/announce&tr=http://tracker2.example.com/announce";
+        let result = parse_magnet_link(magnet_link);
+        assert!(result.is_ok());
+
+        let magnet = result.unwrap();
+        assert_eq!(
+            magnet.trackers,
+            vec![
+                "http://tracker1.example.com/announce".to_string(),
+                "http://tracker2.example.com/announce".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_magnet_link_invalid_file_size() {
+        let magnet_link =
+            "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678&xl=invalid_size";
+        let result = parse_magnet_link(magnet_link);
+        assert!(result.is_ok());
+
+        let magnet = result.unwrap();
+        assert_eq!(magnet.file_size, None);
+    }
 }
