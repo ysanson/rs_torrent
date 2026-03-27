@@ -157,6 +157,13 @@ pub async fn download_from_torrent_file(
     Ok(())
 }
 
+pub async fn download_from_magnet(
+    _magnet: &str,
+    _output_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

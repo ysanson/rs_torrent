@@ -1,6 +1,7 @@
 use std::fs;
 
 use rustc_hash::FxHashMap;
+use url::Url;
 
 use crate::bencode_parser::parser::{ValueOwned, parse_owned};
 
@@ -14,6 +15,14 @@ pub struct Torrent {
     pub name: String,
     pub pieces: Vec<[u8; 20]>,
     pub infohash: [u8; 20],
+}
+
+#[derive(Debug, Clone)]
+pub struct Magnet {
+    pub infohash: [u8; 20],
+    pub display_name: Option<String>,
+    pub trackers: Vec<String>,
+    pub file_size: Option<u64>,
 }
 
 fn get_string(
@@ -112,5 +121,35 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
         name,
         pieces,
         infohash: *infohash,
+    })
+}
+
+pub fn parse_magnet_link(magnet: &str) -> Result<Magnet, Box<dyn std::error::Error>> {
+    let url = Url::parse(magnet)?;
+    let params: FxHashMap<String, String> = url.query_pairs().into_owned().collect();
+    let infohash_hex = params
+        .get("xt")
+        .and_then(|xt| xt.strip_prefix("urn:btih:"))
+        .ok_or("Missing 'xt' parameter")?;
+
+    let infohash: [u8; 20] = infohash_hex
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "Invalid infohash length. Expected 20 bytes.")?;
+
+    let trackers = params
+        .get("tr")
+        .map(|tr| tr.split('&').map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    let display_name = params.get("dn").map(|dn| dn.to_string());
+
+    // Extract file size
+    let file_size: Option<u64> = params.get("xl").map(|xl| xl.parse().ok()).flatten();
+
+    Ok(Magnet {
+        infohash,
+        display_name,
+        trackers,
+        file_size,
     })
 }
