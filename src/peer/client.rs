@@ -1,6 +1,6 @@
 use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
-use crate::peer::message::{Bitfield, Message, MessageId};
+use crate::peer::message::{Bitfield, ExtendedMessage, ExtendedMessageId, Message, MessageId};
 use crate::peer::state::{BlockInfo, DownloadState};
 
 use log::{debug, error};
@@ -556,6 +556,9 @@ impl BitTorrentClient {
             MessageId::Cancel => {
                 // We don't handle cancellations in this simple client
             }
+            MessageId::Extended => {
+                // Not yet implemented.
+            }
         }
         Ok(())
     }
@@ -1084,6 +1087,41 @@ impl BitTorrentClient {
 
     pub async fn write_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.download_state.lock().await.write_to_file(path).await
+    }
+
+    pub fn create_extension_handshake() -> Message {
+        let mut payload = Vec::new();
+        payload.push(ExtendedMessageId::Handshake as u8);
+        payload.extend_from_slice(b"d1:md11:ut_metadatai1ee1:me"); // Example extension handshake
+
+        Message {
+            kind: MessageId::Extended,
+            payload,
+        }
+    }
+
+    pub fn create_metadata_request(piece: u32) -> Message {
+        let mut payload = Vec::new();
+        payload.push(ExtendedMessageId::Metadata as u8);
+        payload.extend_from_slice(&piece.to_be_bytes());
+
+        Message {
+            kind: MessageId::Extended,
+            payload,
+        }
+    }
+
+    pub fn parse_metadata_response(payload: &[u8]) -> Option<Vec<u8>> {
+        if payload.is_empty() {
+            return None;
+        }
+
+        let extended_message = ExtendedMessage::deserialize(payload)?;
+        if extended_message.kind != ExtendedMessageId::Metadata {
+            return None;
+        }
+
+        Some(extended_message.payload)
     }
 }
 

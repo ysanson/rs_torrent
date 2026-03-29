@@ -3,6 +3,8 @@ pub mod peer;
 pub mod torrent;
 pub mod tracker;
 
+use crate::peer::Peer;
+use std::collections::HashSet;
 use std::time::Duration;
 
 // Re-export commonly used types and functions for easier access
@@ -11,6 +13,7 @@ use tokio::time::sleep;
 pub use torrent::{Torrent, parse_torrent_bytes, parse_torrent_file};
 
 use crate::peer::{BitTorrentClient, DownloadState};
+use crate::torrent::parse_magnet_link;
 use crate::tracker::{PEER_ID, announce_to_tracker};
 
 async fn announce_completion_to_tracker(
@@ -36,7 +39,13 @@ pub async fn download_from_torrent_file(
         torrent.total_size,
     );
     let client = BitTorrentClient::new(download_state, PEER_ID);
-    let (reannounce_interval, initial_peers) = announce_to_tracker(&torrent, 6881).await?;
+    let (reannounce_interval, initial_peers) = announce_to_tracker(
+        &torrent.announce,
+        &torrent.infohash,
+        &torrent.total_size,
+        6881,
+    )
+    .await?;
 
     println!(
         "Initial tracker response: {} peers, reannounce interval: {}s",
@@ -66,7 +75,14 @@ pub async fn download_from_torrent_file(
 
             // Handle tracker announcement in a scoped block to avoid Send issues
             let (new_peers_to_connect, new_interval_opt) = {
-                match announce_to_tracker(&torrent_clone, 6881).await {
+                match announce_to_tracker(
+                    &torrent_clone.announce,
+                    &torrent_clone.infohash,
+                    &torrent_clone.total_size,
+                    6881,
+                )
+                .await
+                {
                     Ok((new_interval, new_peers)) => {
                         if new_peers.is_empty() {
                             println!(
@@ -158,9 +174,35 @@ pub async fn download_from_torrent_file(
 }
 
 pub async fn download_from_magnet(
-    _magnet: &str,
-    _output_path: &str,
+    magnet: &str,
+    output_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // First - Retrieve magnet info
+    let magnet_info = parse_magnet_link(magnet)?;
+    let torrent = Torrent {
+        announce: magnet_info.trackers.first().cloned().unwrap_or_default(),
+        creation_date: 0,
+        length: 0,
+        piece_length: 0,
+        total_size: magnet_info.file_size.unwrap_or(0),
+        name: magnet_info.display_name.unwrap_or_default(),
+        pieces: Vec::new(),
+        infohash: magnet_info.infohash,
+    };
+    let mut peers: HashSet<Peer> = HashSet::new();
+    let mut reannounce = 0;
+    for tracker in magnet_info.trackers {
+        let (reannounce_interval, initial_peers) = announce_to_tracker(
+            &tracker,
+            &magnet_info.infohash,
+            &magnet_info.file_size.unwrap_or(0),
+            6881,
+        )
+        .await?;
+        peers.extend(initial_peers);
+        reannounce = reannounce_interval;
+    }
+
     Ok(())
 }
 

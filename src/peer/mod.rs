@@ -8,7 +8,7 @@ pub mod state;
 const PSTR: &str = "BitTorrent protocol";
 const PSTR_LEN: u8 = PSTR.len() as u8; // always 19
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Peer {
     pub ip_addr: Ipv4Addr,
     pub port: u16,
