@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 pub mod client;
 pub mod handshake;
 pub mod message;
+pub mod metadata;
 pub mod state;
 
 const PSTR: &str = "BitTorrent protocol";
@@ -16,3 +17,4 @@ pub struct Peer {
 
 pub use client::{BitTorrentClient, PIECE_BLOCK_SIZE};
 pub use state::DownloadState;
+pub use metadata::fetch_metadata_from_peers;

@@ -4,11 +4,11 @@ pub mod torrent;
 pub mod tracker;
 
 use crate::peer::Peer;
-use std::collections::HashSet;
 use std::time::Duration;
 
 // Re-export commonly used types and functions for easier access
 pub use bencode_parser::parser::{Value, ValueOwned, parse, parse_owned};
+use rustc_hash::FxHashSet;
 use tokio::time::sleep;
 pub use torrent::{Torrent, parse_torrent_bytes, parse_torrent_file};
 
@@ -177,32 +177,169 @@ pub async fn download_from_magnet(
     magnet: &str,
     output_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // First - Retrieve magnet info
+    println!("🧲 Parsing magnet link...");
+
+    // Parse magnet link
     let magnet_info = parse_magnet_link(magnet)?;
-    let torrent = Torrent {
-        announce: magnet_info.trackers.first().cloned().unwrap_or_default(),
-        creation_date: 0,
-        length: 0,
-        piece_length: 0,
-        total_size: magnet_info.file_size.unwrap_or(0),
-        name: magnet_info.display_name.unwrap_or_default(),
-        pieces: Vec::new(),
-        infohash: magnet_info.infohash,
-    };
-    let mut peers: HashSet<Peer> = HashSet::new();
+
+    // Announce to trackers and collect peers
+    let mut peers: FxHashSet<Peer> = FxHashSet::default();
     let mut reannounce = 0;
-    for tracker in magnet_info.trackers {
-        let (reannounce_interval, initial_peers) = announce_to_tracker(
-            &tracker,
+
+    for tracker in &magnet_info.trackers {
+        match announce_to_tracker(
+            tracker,
             &magnet_info.infohash,
             &magnet_info.file_size.unwrap_or(0),
             6881,
         )
-        .await?;
-        peers.extend(initial_peers);
-        reannounce = reannounce_interval;
+        .await
+        {
+            Ok((reannounce_interval, initial_peers)) => {
+                peers.extend(initial_peers);
+                reannounce = reannounce_interval;
+            }
+            Err(e) => {
+                eprintln!("Failed to announce to tracker {}: {}", tracker, e);
+            }
+        }
     }
 
+    if peers.is_empty() {
+        return Err("No peers found from trackers".into());
+    }
+
+    println!("📡 Found {} peers, fetching metadata...", peers.len());
+
+    // Fetch metadata from peers
+    let metadata = peer::fetch_metadata_from_peers(
+        peers.iter().cloned().collect(),
+        &magnet_info.infohash,
+        PEER_ID,
+    )
+    .await?;
+
+    println!("✅ Metadata fetched successfully, parsing torrent info...");
+
+    // Parse the metadata to get the complete torrent info
+    // The metadata is the bencoded info dictionary
+    let complete_torrent = parse_torrent_bytes(&metadata)?;
+
+    println!("📦 Starting download: {}", complete_torrent.name);
+    println!("📊 Total size: {} bytes", complete_torrent.total_size);
+    println!("📦 Pieces: {}", complete_torrent.pieces.len());
+
+    // Initialize download state with the complete torrent info
+    let download_state = DownloadState::new(
+        complete_torrent.pieces.len(),
+        complete_torrent.piece_length,
+        complete_torrent.infohash,
+        complete_torrent.pieces.clone(),
+        complete_torrent.total_size,
+    );
+    let client = BitTorrentClient::new(download_state, PEER_ID);
+
+    // Connect to initial peers
+    client
+        .connect_to_new_peers(peers.into_iter().collect())
+        .await;
+
+    // Start tracker reannouncement task
+    let client_reannounce = client.clone();
+    let torrent_clone = complete_torrent.clone();
+    let reannounce_handle = tokio::spawn(async move {
+        let mut interval = reannounce as u64;
+
+        loop {
+            sleep(Duration::from_secs(interval)).await;
+
+            if client_reannounce.is_complete().await {
+                println!("📢 Download complete, stopping tracker announcements");
+                break;
+            }
+
+            println!("📢 Reannouncing to tracker...");
+
+            let (new_peers_to_connect, new_interval_opt) = {
+                match announce_to_tracker(
+                    &torrent_clone.announce,
+                    &torrent_clone.infohash,
+                    &torrent_clone.total_size,
+                    6881,
+                )
+                .await
+                {
+                    Ok((new_interval, new_peers)) => {
+                        println!("📢 Tracker reannounce: {} new peers", new_peers.len());
+                        (Some(new_peers), Some(new_interval as u64))
+                    }
+                    Err(e) => {
+                        eprintln!("Tracker reannounce failed: {e}");
+                        (None, None)
+                    }
+                }
+            };
+
+            if let Some(new_interval) = new_interval_opt {
+                interval = new_interval;
+            }
+
+            if let Some(new_peers) = new_peers_to_connect {
+                client_reannounce.connect_to_new_peers(new_peers).await;
+            }
+        }
+    });
+
+    // Monitor progress
+    loop {
+        let (downloaded_pieces, total_pieces) = client.get_progress().await;
+        let (downloaded_blocks, total_blocks) = client.get_block_progress().await;
+        let pipeline_stats = client.get_pipeline_stats().await;
+        let peer_info = client.get_peer_info().await;
+
+        let piece_progress = (downloaded_pieces as f64 / total_pieces as f64) * 100.0;
+        let block_progress = (downloaded_blocks as f64 / total_blocks as f64) * 100.0;
+
+        println!(
+            "Progress: {downloaded_pieces}/{total_pieces} pieces ({piece_progress:.1}%) | {downloaded_blocks}/{total_blocks} blocks ({block_progress:.1}%)"
+        );
+
+        println!(
+            "Pipeline: {} requests sent, {} responses, {} timeouts, max depth: {}",
+            pipeline_stats.total_requests_sent,
+            pipeline_stats.total_responses_received,
+            pipeline_stats.total_timeouts,
+            pipeline_stats.max_pipeline_depth_seen
+        );
+
+        let active_peers = peer_info
+            .iter()
+            .filter(|(_, _, can_download)| *can_download)
+            .count();
+        let total_peers = peer_info.len();
+        let total_pending: usize = peer_info.iter().map(|(_, pending, _)| pending).sum();
+        println!(
+            "Peers: {active_peers}/{total_peers} active, {total_pending} total pending requests"
+        );
+
+        if client.is_complete().await {
+            println!("\n✅ Download complete!");
+
+            println!("📢 Announcing completion to tracker...");
+            match announce_completion_to_tracker(&complete_torrent, 6881).await {
+                Ok(_) => println!("✅ Completion announced to tracker"),
+                Err(e) => eprintln!("Failed to announce completion: {e}"),
+            }
+
+            break;
+        }
+
+        sleep(Duration::from_secs(3)).await;
+    }
+
+    reannounce_handle.abort();
+
+    client.write_to_file(output_path).await?;
     Ok(())
 }
 
