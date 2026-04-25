@@ -125,6 +125,62 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
     })
 }
 
+/// Parse a Torrent from a raw bencoded info-dict (as fetched via BEP 9 metadata exchange).
+/// The infohash and announce URL must be supplied externally (e.g. from the magnet link).
+pub fn parse_info_dict_bytes(
+    data: &[u8],
+    infohash: [u8; 20],
+    announce: String,
+) -> Result<Torrent, Box<dyn std::error::Error>> {
+    let parsed = parse_owned(data)?;
+    let info = match parsed.first().ok_or("Empty info dict")? {
+        ValueOwned::Dictionary { entries, .. } => entries,
+        _ => return Err("Expected info dictionary".into()),
+    };
+
+    let name = get_string(info, b"name")?;
+    let piece_length = get_u32(info, b"piece length")?;
+
+    let pieces_bytes = match info.get(b"pieces" as &[u8]).ok_or("Missing 'pieces' field")? {
+        ValueOwned::Bytes(b) => b,
+        _ => return Err("Invalid 'pieces' field".into()),
+    };
+
+    let pieces: Vec<[u8; 20]> = pieces_bytes
+        .chunks_exact(20)
+        .map(|chunk| <[u8; 20]>::try_from(chunk).unwrap())
+        .collect();
+
+    let total_size = if let Ok(length) = get_u64(info, b"length") {
+        length
+    } else if let Some(ValueOwned::List(files)) = info.get(b"files" as &[u8]) {
+        files.iter().fold(0u64, |acc, file| {
+            if let ValueOwned::Dictionary { entries, hash: _ } = file {
+                if let Ok(length) = get_u64(entries, b"length") {
+                    acc + length
+                } else {
+                    acc
+                }
+            } else {
+                acc
+            }
+        })
+    } else {
+        return Err("Cannot determine torrent size".into());
+    };
+
+    Ok(Torrent {
+        announce,
+        creation_date: 0,
+        length: total_size as u32,
+        piece_length,
+        total_size,
+        name,
+        pieces,
+        infohash,
+    })
+}
+
 pub fn parse_magnet_link(magnet: &str) -> Result<Magnet, Box<dyn std::error::Error>> {
     let url = Url::parse(magnet)?;
     let mut magnet = Magnet {

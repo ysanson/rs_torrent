@@ -13,7 +13,7 @@ use tokio::time::sleep;
 pub use torrent::{Torrent, parse_torrent_bytes, parse_torrent_file};
 
 use crate::peer::{BitTorrentClient, DownloadState};
-use crate::torrent::parse_magnet_link;
+use crate::torrent::{parse_info_dict_bytes, parse_magnet_link};
 use crate::tracker::{PEER_ID, announce_to_tracker};
 
 async fn announce_completion_to_tracker(
@@ -182,25 +182,37 @@ pub async fn download_from_magnet(
     // Parse magnet link
     let magnet_info = parse_magnet_link(magnet)?;
 
-    // Announce to trackers and collect peers
+    // Announce to all trackers concurrently; stop early once we have enough peers.
     let mut peers: FxHashSet<Peer> = FxHashSet::default();
-    let mut reannounce = 0;
+    let mut reannounce = 1800i64;
 
-    for tracker in &magnet_info.trackers {
-        match announce_to_tracker(
-            tracker,
-            &magnet_info.infohash,
-            &magnet_info.file_size.unwrap_or(0),
-            6881,
-        )
-        .await
-        {
-            Ok((reannounce_interval, initial_peers)) => {
-                peers.extend(initial_peers);
-                reannounce = reannounce_interval;
+    {
+        let mut tasks: tokio::task::JoinSet<Result<(i64, Vec<Peer>), String>> =
+            tokio::task::JoinSet::new();
+        for tracker in &magnet_info.trackers {
+            let tracker = tracker.clone();
+            let infohash = magnet_info.infohash;
+            let file_size = magnet_info.file_size.unwrap_or(0);
+            tasks.spawn(async move {
+                announce_to_tracker(&tracker, &infohash, &file_size, 6881)
+                    .await
+                    .map_err(|e| e.to_string())
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok((interval, initial_peers))) => {
+                    if !initial_peers.is_empty() {
+                        reannounce = interval;
+                    }
+                    peers.extend(initial_peers);
+                }
+                Ok(Err(e)) => eprintln!("Failed to announce to tracker: {e}"),
+                Err(_) => {}
             }
-            Err(e) => {
-                eprintln!("Failed to announce to tracker {}: {}", tracker, e);
+            if peers.len() >= 50 {
+                tasks.abort_all();
+                break;
             }
         }
     }
@@ -221,9 +233,9 @@ pub async fn download_from_magnet(
 
     println!("✅ Metadata fetched successfully, parsing torrent info...");
 
-    // Parse the metadata to get the complete torrent info
-    // The metadata is the bencoded info dictionary
-    let complete_torrent = parse_torrent_bytes(&metadata)?;
+    // Metadata from BEP 9 is the raw info-dict, not a full .torrent file.
+    let announce = magnet_info.trackers.first().cloned().unwrap_or_default();
+    let complete_torrent = parse_info_dict_bytes(&metadata, magnet_info.infohash, announce)?;
 
     println!("📦 Starting download: {}", complete_torrent.name);
     println!("📊 Total size: {} bytes", complete_torrent.total_size);
