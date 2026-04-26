@@ -223,13 +223,11 @@ pub async fn download_from_magnet(
 
     println!("📡 Found {} peers, fetching metadata...", peers.len());
 
+    let peers_vec: Vec<Peer> = peers.iter().cloned().collect();
+
     // Fetch metadata from peers
-    let metadata = peer::fetch_metadata_from_peers(
-        peers.iter().cloned().collect(),
-        &magnet_info.infohash,
-        PEER_ID,
-    )
-    .await?;
+    let metadata =
+        peer::fetch_metadata_from_peers(&peers_vec, &magnet_info.infohash, PEER_ID).await?;
 
     println!("✅ Metadata fetched successfully, parsing torrent info...");
 
@@ -252,9 +250,7 @@ pub async fn download_from_magnet(
     let client = BitTorrentClient::new(download_state, PEER_ID);
 
     // Connect to initial peers
-    client
-        .connect_to_new_peers(peers.into_iter().collect())
-        .await;
+    client.connect_to_new_peers(peers_vec).await;
 
     // Start tracker reannouncement task
     let client_reannounce = client.clone();

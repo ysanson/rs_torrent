@@ -180,7 +180,13 @@ async fn download_from_torrent_file(file_path: &str) -> Result<(), Box<dyn std::
     let client = BitTorrentClient::new(download_state, peer_id);
 
     // Step 4: Get peers from tracker
-    let peers = rs_torrent::tracker::announce_to_tracker(&torrent, 6881).await?;
+    let peers = rs_torrent::tracker::announce_to_tracker(
+        &torrent.announce,
+        &torrent.infohash,
+        &torrent.total_size,
+        6881,
+    )
+    .await?;
     println!("Found {} peers from tracker", peers.1.len());
 
     // Step 5: Start download

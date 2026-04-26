@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+use crate::torrent::{Infohash, PieceHash};
+
 const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
 
 /// Represents a block within a piece
@@ -24,7 +26,7 @@ pub struct DownloadState {
     pub requested: HashSet<usize>,    // Which pieces are currently being downloaded
     pub piece_blocks: FxHashMap<usize, Vec<Option<Vec<u8>>>>, // Blocks within each piece
     pub requested_blocks: HashSet<BlockInfo>, // Which blocks are currently being requested
-    pub pieces_hash: Vec<[u8; 20]>,   // SHA1 hashes for each piece
+    pub pieces_hash: Vec<PieceHash>,  // SHA1 hashes for each piece
     pub total_size: u64,              // Total size of all data
 }
 
@@ -32,8 +34,8 @@ impl DownloadState {
     pub fn new(
         total_pieces: usize,
         piece_length: u32,
-        info_hash: [u8; 20],
-        pieces_hash: Vec<[u8; 20]>,
+        info_hash: Infohash,
+        pieces_hash: Vec<PieceHash>,
         total_size: u64,
     ) -> Self {
         Self {

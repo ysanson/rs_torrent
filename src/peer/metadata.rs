@@ -2,7 +2,9 @@ use crate::bencode_parser::parser::{ValueOwned, parse_owned};
 use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
 use crate::peer::message::{ExtendedMessageId, Message, MessageId};
+use crate::torrent::Infohash;
 use log::debug;
+use rustc_hash::FxHashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,16 +26,18 @@ pub struct MetadataExtension {
     pub metadata_size: usize,
 }
 
+pub type MetadataPiece = (usize, Vec<u8>);
+
 /// Fetch metadata from a list of peers, trying up to N peers concurrently.
 pub async fn fetch_metadata_from_peers(
-    peers: Vec<Peer>,
-    infohash: &[u8; 20],
+    peers: &Vec<Peer>,
+    infohash: &Infohash,
     peer_id: [u8; 20],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     const CONCURRENT: usize = 5;
 
     let mut tasks: tokio::task::JoinSet<Result<Vec<u8>, String>> = tokio::task::JoinSet::new();
-    let mut peers_iter = peers.into_iter();
+    let mut peers_iter = peers.clone().into_iter();
 
     let spawn_next = |tasks: &mut tokio::task::JoinSet<Result<Vec<u8>, String>>,
                       peers_iter: &mut std::vec::IntoIter<Peer>| {
@@ -76,7 +80,7 @@ pub async fn fetch_metadata_from_peers(
 /// Fetch metadata from a single peer
 async fn fetch_metadata_from_peer(
     peer: &Peer,
-    infohash: &[u8; 20],
+    infohash: &Infohash,
     peer_id: [u8; 20],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let addr = SocketAddr::from((peer.ip_addr, peer.port));
@@ -123,7 +127,7 @@ async fn fetch_metadata_from_peer(
     );
 
     // Calculate number of pieces needed
-    let num_pieces = (metadata_ext.metadata_size + METADATA_PIECE_SIZE - 1) / METADATA_PIECE_SIZE;
+    let num_pieces = metadata_ext.metadata_size.div_ceil(METADATA_PIECE_SIZE);
     let mut metadata_pieces: Vec<Option<Vec<u8>>> = vec![None; num_pieces];
     let mut requested_pieces: Vec<bool> = vec![false; num_pieces];
 
@@ -166,17 +170,17 @@ async fn fetch_metadata_from_peer(
                 MessageId::Extended => {
                     if let Some((piece_index, piece_data)) =
                         parse_metadata_piece(&message.payload, OUR_UT_METADATA_ID)?
+                        && piece_index < num_pieces
+                        && metadata_pieces[piece_index].is_none()
                     {
-                        if piece_index < num_pieces && metadata_pieces[piece_index].is_none() {
-                            metadata_pieces[piece_index] = Some(piece_data);
-                            received_pieces += 1;
-                            waiting_for_response = false;
-                            retry_count = 0;
-                            println!(
-                                "📥 Received metadata piece {}/{}",
-                                received_pieces, num_pieces
-                            );
-                        }
+                        metadata_pieces[piece_index] = Some(piece_data);
+                        received_pieces += 1;
+                        waiting_for_response = false;
+                        retry_count = 0;
+                        println!(
+                            "📥 Received metadata piece {}/{}",
+                            received_pieces, num_pieces
+                        );
                     }
                 }
                 MessageId::Bitfield
@@ -196,7 +200,7 @@ async fn fetch_metadata_from_peer(
             },
             Err(e) => {
                 // e must be fully consumed before any .await; convert to string immediately.
-                debug!("Error receiving message: {}", e.to_string());
+                debug!("Error receiving message: {}", e);
                 retry_count += 1;
                 waiting_for_response = false;
                 for i in 0..num_pieces {
@@ -391,7 +395,7 @@ fn find_bencode_end(data: &[u8]) -> Option<usize> {
 fn parse_metadata_piece(
     payload: &[u8],
     expected_ut_metadata: u8,
-) -> Result<Option<(usize, Vec<u8>)>, Box<dyn std::error::Error>> {
+) -> Result<Option<MetadataPiece>, Box<dyn std::error::Error>> {
     if payload.is_empty() {
         return Ok(None);
     }

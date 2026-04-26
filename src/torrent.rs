@@ -6,6 +6,9 @@ use url::Url;
 
 use crate::bencode_parser::parser::{ValueOwned, parse_owned};
 
+pub type Infohash = [u8; 20];
+pub type PieceHash = [u8; 20];
+
 #[derive(Debug, Clone)]
 pub struct Torrent {
     pub announce: String,
@@ -14,13 +17,13 @@ pub struct Torrent {
     pub piece_length: u32,
     pub total_size: u64,
     pub name: String,
-    pub pieces: Vec<[u8; 20]>,
-    pub infohash: [u8; 20],
+    pub pieces: Vec<PieceHash>,
+    pub infohash: Infohash,
 }
 
 #[derive(Debug, Clone)]
 pub struct Magnet {
-    pub infohash: [u8; 20],
+    pub infohash: Infohash,
     pub display_name: Option<String>,
     pub trackers: Vec<String>,
     pub file_size: Option<u64>,
@@ -129,7 +132,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
 /// The infohash and announce URL must be supplied externally (e.g. from the magnet link).
 pub fn parse_info_dict_bytes(
     data: &[u8],
-    infohash: [u8; 20],
+    infohash: Infohash,
     announce: String,
 ) -> Result<Torrent, Box<dyn std::error::Error>> {
     let parsed = parse_owned(data)?;
@@ -141,7 +144,10 @@ pub fn parse_info_dict_bytes(
     let name = get_string(info, b"name")?;
     let piece_length = get_u32(info, b"piece length")?;
 
-    let pieces_bytes = match info.get(b"pieces" as &[u8]).ok_or("Missing 'pieces' field")? {
+    let pieces_bytes = match info
+        .get(b"pieces" as &[u8])
+        .ok_or("Missing 'pieces' field")?
+    {
         ValueOwned::Bytes(b) => b,
         _ => return Err("Invalid 'pieces' field".into()),
     };
@@ -194,11 +200,11 @@ pub fn parse_magnet_link(magnet: &str) -> Result<Magnet, Box<dyn std::error::Err
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
             "xt" => {
-                if let Some(hex) = value.strip_prefix("urn:btih:") {
-                    if let Ok(infohash) = <[u8; 20]>::from_hex(hex) {
-                        magnet.infohash = infohash;
-                    };
-                }
+                if let Some(hex) = value.strip_prefix("urn:btih:")
+                    && let Ok(infohash) = <[u8; 20]>::from_hex(hex)
+                {
+                    magnet.infohash = infohash;
+                };
             }
             "tr" => {
                 magnet.trackers.push(value.into_owned());
