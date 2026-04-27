@@ -89,17 +89,23 @@ async fn udp_connect(
     Ok(connection_id)
 }
 
+/// Torrent-specific parameters for a UDP announce request.
+/// All fields are `Copy`, so no lifetime annotation is needed.
+struct AnnounceParams {
+    infohash: Infohash,
+    peer_id: [u8; 20],
+    downloaded: u64,
+    left: u64,
+    uploaded: u64,
+    port: u16,
+}
+
 /// Send announce request and receive peer list
 async fn udp_announce(
     socket: &UdpSocket,
     tracker_addr: SocketAddr,
     connection_id: i64,
-    infohash: &Infohash,
-    peer_id: &[u8; 20],
-    downloaded: u64,
-    left: u64,
-    uploaded: u64,
-    port: u16,
+    params: &AnnounceParams,
 ) -> Result<(i32, Vec<Peer>), Box<dyn std::error::Error>> {
     let transaction_id = generate_transaction_id();
 
@@ -108,16 +114,16 @@ async fn udp_announce(
     request.extend_from_slice(&connection_id.to_be_bytes());
     request.extend_from_slice(&ANNOUNCE_ACTION.to_be_bytes());
     request.extend_from_slice(&transaction_id.to_be_bytes());
-    request.extend_from_slice(infohash);
-    request.extend_from_slice(peer_id);
-    request.extend_from_slice(&downloaded.to_be_bytes());
-    request.extend_from_slice(&left.to_be_bytes());
-    request.extend_from_slice(&uploaded.to_be_bytes());
+    request.extend_from_slice(&params.infohash);
+    request.extend_from_slice(&params.peer_id);
+    request.extend_from_slice(&params.downloaded.to_be_bytes());
+    request.extend_from_slice(&params.left.to_be_bytes());
+    request.extend_from_slice(&params.uploaded.to_be_bytes());
     request.extend_from_slice(&0i32.to_be_bytes()); // event: 0 = none
     request.extend_from_slice(&0u32.to_be_bytes()); // IP address: 0 = default
     request.extend_from_slice(&0u32.to_be_bytes()); // key: random
     request.extend_from_slice(&(-1i32).to_be_bytes()); // num_want: -1 = default
-    request.extend_from_slice(&port.to_be_bytes());
+    request.extend_from_slice(&params.port.to_be_bytes());
 
     // Send request
     socket.send_to(&request, tracker_addr).await?;
@@ -192,18 +198,15 @@ pub async fn announce_to_udp_tracker(
     let connection_id = udp_connect(&socket, tracker_addr).await?;
 
     // Announce to tracker
-    let (interval, peers) = udp_announce(
-        &socket,
-        tracker_addr,
-        connection_id,
-        infohash,
-        peer_id,
+    let params = AnnounceParams {
+        infohash: *infohash,
+        peer_id: *peer_id,
         downloaded,
         left,
         uploaded,
         port,
-    )
-    .await?;
+    };
+    let (interval, peers) = udp_announce(&socket, tracker_addr, connection_id, &params).await?;
 
     Ok((interval, peers))
 }

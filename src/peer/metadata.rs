@@ -4,7 +4,6 @@ use crate::peer::handshake::Handshake;
 use crate::peer::message::{ExtendedMessageId, Message, MessageId};
 use crate::torrent::Infohash;
 use log::debug;
-use rustc_hash::FxHashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,14 +29,14 @@ pub type MetadataPiece = (usize, Vec<u8>);
 
 /// Fetch metadata from a list of peers, trying up to N peers concurrently.
 pub async fn fetch_metadata_from_peers(
-    peers: &Vec<Peer>,
+    peers: &[Peer],
     infohash: &Infohash,
     peer_id: [u8; 20],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     const CONCURRENT: usize = 5;
 
     let mut tasks: tokio::task::JoinSet<Result<Vec<u8>, String>> = tokio::task::JoinSet::new();
-    let mut peers_iter = peers.clone().into_iter();
+    let mut peers_iter = peers.to_owned().into_iter();
 
     let spawn_next = |tasks: &mut tokio::task::JoinSet<Result<Vec<u8>, String>>,
                       peers_iter: &mut std::vec::IntoIter<Peer>| {
