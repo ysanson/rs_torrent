@@ -41,15 +41,20 @@ pub fn build_completion_tracker_url(torrent: &Torrent, port: u16) -> Result<Stri
     Ok(base.to_string())
 }
 
-fn build_tracker_url(torrent: &Torrent, port: u16) -> Result<String, ParseError> {
-    let mut base = Url::parse(&torrent.announce)?;
+fn build_tracker_url(
+    announce_url: &str,
+    infohash: &[u8],
+    length: &u64,
+    port: u16,
+) -> Result<String, ParseError> {
+    let mut base = Url::parse(announce_url)?;
 
-    let info_hash = encode_bytes(&torrent.infohash);
+    let info_hash = encode_bytes(infohash);
     let peer_id = encode_bytes(&PEER_ID);
 
     let new_params = format!(
         "info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&compact=1&left={}",
-        info_hash, peer_id, port, torrent.length
+        info_hash, peer_id, port, length
     );
 
     // Preserve existing query parameters and append new ones
@@ -93,10 +98,12 @@ fn extract_peers(bytes: &[u8]) -> Option<Vec<Peer>> {
 }
 
 pub async fn announce_to_tracker(
-    torrent: &Torrent,
+    announce_url: &str,
+    infohash: &[u8],
+    length: &u64,
     port: u16,
 ) -> Result<(i64, Vec<Peer>), Box<dyn Error>> {
-    let url = build_tracker_url(torrent, port)?;
+    let url = build_tracker_url(announce_url, infohash, length, port)?;
     let response_bytes = contact_tracker(&url).await?;
     let values = parse_owned(&response_bytes)?;
     let dict = match values.first() {
@@ -147,7 +154,13 @@ mod tests {
     fn test_build_tracker_url() {
         let torrent = create_test_torrent();
         let port = 6881;
-        let url = build_tracker_url(&torrent, port).unwrap();
+        let url = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            port,
+        )
+        .unwrap();
 
         assert!(url.contains("http://tracker.example.com:8080/announce"));
         assert!(url.contains("port=6881"));
@@ -164,7 +177,12 @@ mod tests {
         let mut torrent = create_test_torrent();
         torrent.announce = "invalid_url".to_string();
         let port = 6881;
-        let result = build_tracker_url(&torrent, port);
+        let result = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            port,
+        );
         assert!(result.is_err());
     }
 
@@ -172,7 +190,13 @@ mod tests {
     fn test_build_tracker_url_encoding() {
         let torrent = create_test_torrent();
         let port = 6881;
-        let url = build_tracker_url(&torrent, port).unwrap();
+        let url = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            port,
+        )
+        .unwrap();
 
         // Check that infohash is percent-encoded (should contain encoded bytes)
         assert!(url.contains("info_hash="));
@@ -261,11 +285,18 @@ mod tests {
         let torrent = create_test_torrent();
 
         // Test port 0
-        let url = build_tracker_url(&torrent, 0).unwrap();
+        let url = build_tracker_url(&torrent.announce, &torrent.infohash, &torrent.total_size, 0)
+            .unwrap();
         assert!(url.contains("port=0"));
 
         // Test max port
-        let url = build_tracker_url(&torrent, 65535).unwrap();
+        let url = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            65535,
+        )
+        .unwrap();
         assert!(url.contains("port=65535"));
     }
 
@@ -288,7 +319,13 @@ mod tests {
         let mut torrent = create_test_torrent();
         torrent.announce = "http://tracker.example.com:8080/announce?existing=param".to_string();
         let port = 6881;
-        let url = build_tracker_url(&torrent, port).unwrap();
+        let url = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            port,
+        )
+        .unwrap();
 
         // Should preserve existing query params and add new ones
         assert!(url.contains("existing=param"));
@@ -301,12 +338,24 @@ mod tests {
 
         // Test HTTPS
         torrent.announce = "https://tracker.example.com/announce".to_string();
-        let url = build_tracker_url(&torrent, 6881).unwrap();
+        let url = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            6881,
+        )
+        .unwrap();
         assert!(url.starts_with("https://"));
 
         // Test HTTP
         torrent.announce = "http://tracker.example.com/announce".to_string();
-        let url = build_tracker_url(&torrent, 6881).unwrap();
+        let url = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            6881,
+        )
+        .unwrap();
         assert!(url.starts_with("http://"));
     }
 
@@ -329,13 +378,25 @@ mod tests {
         let mut torrent = create_test_torrent();
 
         // Test with 0 length
-        torrent.length = 0;
-        let url = build_tracker_url(&torrent, 6881).unwrap();
+        torrent.total_size = 0;
+        let url = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            6881,
+        )
+        .unwrap();
         assert!(url.contains("left=0"));
 
         // Test with large length
-        torrent.length = u32::MAX;
-        let url = build_tracker_url(&torrent, 6881).unwrap();
+        torrent.total_size = u32::MAX as u64;
+        let url = build_tracker_url(
+            &torrent.announce,
+            &torrent.infohash,
+            &torrent.total_size,
+            6881,
+        )
+        .unwrap();
         assert!(url.contains(&format!("left={}", u32::MAX)));
     }
 

@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+use crate::torrent::{Infohash, PieceHash};
+
 const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
 
 /// Represents a block within a piece
@@ -24,7 +26,7 @@ pub struct DownloadState {
     pub requested: HashSet<usize>,    // Which pieces are currently being downloaded
     pub piece_blocks: FxHashMap<usize, Vec<Option<Vec<u8>>>>, // Blocks within each piece
     pub requested_blocks: HashSet<BlockInfo>, // Which blocks are currently being requested
-    pub pieces_hash: Vec<[u8; 20]>,   // SHA1 hashes for each piece
+    pub pieces_hash: Vec<PieceHash>,  // SHA1 hashes for each piece
     pub total_size: u64,              // Total size of all data
 }
 
@@ -32,8 +34,8 @@ impl DownloadState {
     pub fn new(
         total_pieces: usize,
         piece_length: u32,
-        info_hash: [u8; 20],
-        pieces_hash: Vec<[u8; 20]>,
+        info_hash: Infohash,
+        pieces_hash: Vec<PieceHash>,
         total_size: u64,
     ) -> Self {
         Self {
@@ -49,12 +51,15 @@ impl DownloadState {
         }
     }
 
-    /// Try to find a missing block this peer has and we don't
-    pub fn pick_block(&self, peer_bitfield: &[bool]) -> Option<BlockInfo> {
-        for (i, piece) in self.pieces.iter().enumerate() {
-            if piece.is_none() && peer_bitfield.get(i).copied().unwrap_or(false) {
-                // Find next block in this piece that we need
-                if let Some(block_info) = self.find_next_block_in_piece(i) {
+    /// Try to find a missing block this peer has and we don't.
+    /// `start_piece` is a per-peer offset so different peers scan from different
+    /// positions, avoiding contention on the same early pieces.
+    pub fn pick_block(&self, peer_bitfield: &[bool], start_piece: usize) -> Option<BlockInfo> {
+        let total = self.pieces.len();
+        for i in 0..total {
+            let idx = (start_piece + i) % total;
+            if self.pieces[idx].is_none() && peer_bitfield.get(idx).copied().unwrap_or(false) {
+                if let Some(block_info) = self.find_next_block_in_piece(idx) {
                     return Some(block_info);
                 }
             }
@@ -302,7 +307,7 @@ mod tests {
         let peer_bitfield = vec![true, false, true]; // Has pieces 0 and 2
 
         // Should pick first block of piece 0
-        let block = state.pick_block(&peer_bitfield).unwrap();
+        let block = state.pick_block(&peer_bitfield, 0).unwrap();
         assert_eq!(block.piece_index, 0);
         assert_eq!(block.offset, 0);
         assert_eq!(block.length, 16384);
@@ -311,7 +316,7 @@ mod tests {
         state.mark_block_requested(block.clone());
 
         // Should pick second block of piece 0
-        let block2 = state.pick_block(&peer_bitfield).unwrap();
+        let block2 = state.pick_block(&peer_bitfield, 0).unwrap();
         assert_eq!(block2.piece_index, 0);
         assert_eq!(block2.offset, 16384);
         assert_eq!(block2.length, 16384);
@@ -436,7 +441,7 @@ mod tests {
         // Simulate timeout: remove from requested_blocks (as timeout handler does)
         state.requested_blocks.remove(&block_info);
         // Now pick_block should return the same block again
-        let picked = state.pick_block(&peer_bitfield);
+        let picked = state.pick_block(&peer_bitfield, 0);
         assert_eq!(picked, Some(block_info));
     }
 

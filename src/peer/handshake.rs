@@ -1,8 +1,11 @@
-use crate::peer::{PSTR, PSTR_LEN};
+use crate::{
+    peer::{PSTR, PSTR_LEN},
+    torrent::Infohash,
+};
 
 #[derive(Debug)]
 pub struct Handshake {
-    pub infohash: [u8; 20],
+    pub infohash: Infohash,
     pub peer_id: [u8; 20],
 }
 

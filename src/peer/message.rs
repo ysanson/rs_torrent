@@ -10,6 +10,7 @@ pub enum MessageId {
     Request = 6,
     Piece = 7,
     Cancel = 8,
+    Extended = 20,
 }
 
 impl TryFrom<u8> for MessageId {
@@ -26,6 +27,7 @@ impl TryFrom<u8> for MessageId {
             6 => Ok(Self::Request),
             7 => Ok(Self::Piece),
             8 => Ok(Self::Cancel),
+            20 => Ok(Self::Extended),
             _ => Err(()),
         }
     }
@@ -113,6 +115,50 @@ impl TryFrom<Message> for Bitfield {
             return Err("Not a bitfield message");
         }
         Ok(Bitfield { bits: msg.payload })
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtendedMessageId {
+    Handshake = 0,
+    Metadata = 1,
+}
+
+impl TryFrom<u8> for ExtendedMessageId {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ExtendedMessageId::Handshake),
+            1 => Ok(ExtendedMessageId::Metadata),
+            _ => Err(()),
+        }
+    }
+}
+
+pub struct ExtendedMessage {
+    pub kind: ExtendedMessageId,
+    pub payload: Vec<u8>,
+}
+
+impl ExtendedMessage {
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(self.kind as u8);
+        buf.extend_from_slice(&self.payload);
+        buf
+    }
+
+    pub fn deserialize(buf: &[u8]) -> Option<Self> {
+        if buf.is_empty() {
+            return None;
+        }
+
+        let kind = ExtendedMessageId::try_from(buf[0]).ok()?;
+        let payload = buf[1..].to_vec();
+
+        Some(Self { kind, payload })
     }
 }
 
