@@ -162,7 +162,7 @@ async fn udp_announce(
 
 /// Extract peers from binary peer data
 fn extract_peers(data: &[u8]) -> Result<Vec<Peer>, Box<dyn std::error::Error>> {
-    if data.len().is_multiple_of(6) {
+    if !data.len().is_multiple_of(6) {
         return Err("Invalid peer data length".into());
     }
 

@@ -378,7 +378,7 @@ mod tests {
         let mut torrent = create_test_torrent();
 
         // Test with 0 length
-        torrent.length = 0;
+        torrent.total_size = 0;
         let url = build_tracker_url(
             &torrent.announce,
             &torrent.infohash,
@@ -389,7 +389,7 @@ mod tests {
         assert!(url.contains("left=0"));
 
         // Test with large length
-        torrent.length = u32::MAX;
+        torrent.total_size = u32::MAX as u64;
         let url = build_tracker_url(
             &torrent.announce,
             &torrent.infohash,

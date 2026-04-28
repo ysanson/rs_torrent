@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
 
 pub const PIECE_BLOCK_SIZE: usize = 16384;
@@ -110,18 +111,30 @@ pub struct PipelineStats {
     pub average_response_time_ms: f64,
 }
 
-/// Performance cache to eliminate allocations in hot paths
+/// Performance cache to eliminate allocations in hot paths (one instance per peer)
 #[derive(Debug)]
 pub struct PerformanceCache {
     pub bitfield_buffer: Vec<bool>,
     pub block_batch: Vec<BlockInfo>,
+    /// Starting piece index for block picking, derived from peer address to spread work
+    pub piece_offset: usize,
 }
 
 impl PerformanceCache {
-    pub fn new(total_pieces: usize) -> Self {
+    pub fn new_for_peer(total_pieces: usize, addr: &SocketAddr) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        addr.hash(&mut hasher);
+        let piece_offset = if total_pieces > 0 {
+            (hasher.finish() as usize) % total_pieces
+        } else {
+            0
+        };
         Self {
             bitfield_buffer: Vec::with_capacity(total_pieces),
             block_batch: Vec::with_capacity(BATCH_SIZE),
+            piece_offset,
         }
     }
 
@@ -234,18 +247,15 @@ pub struct BitTorrentClient {
     pub connections: Arc<Mutex<IndexedConnections>>,
     pub pipeline_stats: Arc<Mutex<PipelineStats>>,
     pub peer_id: [u8; 20],
-    pub perf_cache: Arc<Mutex<PerformanceCache>>,
 }
 
 impl BitTorrentClient {
     pub fn new(download_state: DownloadState, peer_id: [u8; 20]) -> Self {
-        let total_pieces = download_state.total_pieces;
         Self {
             download_state: Arc::new(Mutex::new(download_state)),
             connections: Arc::new(Mutex::new(IndexedConnections::new())),
             pipeline_stats: Arc::new(Mutex::new(PipelineStats::default())),
             peer_id,
-            perf_cache: Arc::new(Mutex::new(PerformanceCache::new(total_pieces))),
         }
     }
 
@@ -306,23 +316,15 @@ impl BitTorrentClient {
             connections.insert(addr, PeerConnection::new(peer));
         }
 
-        // Send interested message
-        let interested_msg = Message {
-            kind: MessageId::Interested,
-            payload: vec![],
-        };
+        // Send interested + unchoke before splitting the stream
+        let interested_msg = Message { kind: MessageId::Interested, payload: vec![] };
         stream.write_all(&interested_msg.serialize()).await?;
         debug!("📤 Sent 'interested' to peer {addr}");
 
-        // Send unchoke message to encourage peer to unchoke us (tit-for-tat)
-        let unchoke_msg = Message {
-            kind: MessageId::Unchoke,
-            payload: vec![],
-        };
+        let unchoke_msg = Message { kind: MessageId::Unchoke, payload: vec![] };
         stream.write_all(&unchoke_msg.serialize()).await?;
         debug!("📤 Sent 'unchoke' to peer {addr}");
 
-        // Update our state
         {
             let mut connections = self.connections.lock().await;
             if let Some(conn) = connections.get_mut(&addr) {
@@ -331,48 +333,63 @@ impl BitTorrentClient {
             }
         }
 
-        // Wait a bit for peer to send initial messages (bitfield, etc.)
+        // Give the peer a moment to send its initial bitfield/unchoke
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Message handling loop
-        loop {
-            match self.handle_peer_messages(&mut stream, &addr).await {
-                Ok(should_continue) => {
-                    if !should_continue {
-                        break;
+        // Per-peer cache: owns its own buffers and a piece offset derived from the
+        // peer address so different peers start scanning from different pieces.
+        let total_pieces = self.download_state.lock().await.total_pieces;
+        let mut perf_cache = PerformanceCache::new_for_peer(total_pieces, &addr);
+
+        // Split the stream: a background task reads continuously; the main loop writes.
+        let (mut read_half, mut write_half) = stream.into_split();
+        let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(32);
+
+        let reader_task = tokio::spawn(async move {
+            loop {
+                match read_raw_message(&mut read_half).await {
+                    Ok(Some(msg)) => {
+                        if msg_tx.send(msg).await.is_err() {
+                            break;
+                        }
                     }
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    if error_msg.contains("deadline has elapsed") {
-                        debug!("⏰ Read timeout for peer {addr}, attempting to recover...");
-                        // Don't break immediately on timeout, try to recover
-                        continue;
-                    } else {
-                        debug!("Error handling peer {addr}: {e}");
-                        break;
-                    }
+                    Ok(None) | Err(_) => break,
                 }
             }
+        });
 
-            // Handle request timeouts
+        // Main loop: process messages when they arrive OR tick every 100 ms to
+        // refill the request pipeline even when the peer is quiet.
+        loop {
+            tokio::select! {
+                biased;
+                msg_opt = msg_rx.recv() => {
+                    match msg_opt {
+                        Some(msg) => {
+                            if let Err(e) = self.process_message(msg, &addr).await {
+                                debug!("Error processing message from {addr}: {e}");
+                                break;
+                            }
+                        }
+                        None => {
+                            debug!("🔌 Connection closed by peer {addr}");
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+
             if let Err(e) = self.handle_request_timeouts(&addr).await {
                 debug!("Error handling timeouts for peer {addr}: {e}");
             }
 
-            // Try to download blocks if we can
-            if let Err(e) = self.try_download_blocks(&mut stream, &addr).await {
-                // Don't break on "not ready" errors, just continue
-                let error_msg = e.to_string();
-                if !error_msg.contains("not ready") && !error_msg.contains("timeout") {
-                    debug!("Error downloading from peer {addr}: {e}");
-                    break;
-                } else if error_msg.contains("timeout") {
-                    debug!("⏰ Timeout in try_download_blocks for peer {addr}, continuing...");
-                }
+            if let Err(e) = self.try_download_blocks(&mut write_half, &addr, &mut perf_cache).await {
+                debug!("Error downloading from peer {addr}: {e}");
+                break;
             }
 
-            // Print diagnostics every 60 seconds for debugging (reduced frequency)
+            // Print diagnostics every 60 seconds
             {
                 let connections = self.connections.lock().await;
                 if let Some(conn) = connections.get(&addr)
@@ -386,98 +403,33 @@ impl BitTorrentClient {
                 }
             }
 
-            // Send keep-alive if no recent activity
-            if let Err(e) = self.send_keep_alive_if_needed(&mut stream, &addr).await {
+            if let Err(e) = self.send_keep_alive_if_needed(&mut write_half, &addr).await {
                 debug!("Error sending keep-alive to peer {addr}: {e}");
                 break;
             }
 
-            // Check if download is complete
-            {
-                let download_state = self.download_state.lock().await;
-                if download_state.is_complete() {
-                    debug!("Download complete!");
-                    break;
-                }
+            if self.download_state.lock().await.is_complete() {
+                debug!("Download complete!");
+                break;
             }
         }
+
+        reader_task.abort();
 
         // Clean up connection and any pending requests
         {
             let mut download_state = self.download_state.lock().await;
             let mut connections = self.connections.lock().await;
-
-            // Remove any pending requests from download state before removing connection
             if let Some(conn) = connections.get(&addr) {
                 for block_info in conn.pending_requests.keys() {
                     download_state.requested_blocks.remove(block_info);
                 }
             }
-
             connections.remove(&addr);
         }
         debug!("🔌 Disconnected from peer {addr}");
 
         Ok(())
-    }
-
-    /// Handle incoming messages from a peer
-    async fn handle_peer_messages(
-        &self,
-        stream: &mut TcpStream,
-        addr: &SocketAddr,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
-        // Read message length with adaptive timeout
-        let mut len_buf = [0u8; 4];
-        match timeout(
-            Duration::from_millis(10000),
-            stream.read_exact(&mut len_buf),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) => {
-                debug!("🔌 Connection closed by peer {addr}");
-                return Ok(false); // Connection closed
-            }
-            Err(_) => {
-                // Timeout - check if peer is still responsive
-                debug!("⏰ Read timeout for peer {addr}, continuing...");
-                return Ok(true); // Timeout, continue
-            }
-        }
-
-        let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len == 0 {
-            // Keep-alive message received
-            debug!("💓 Received keep-alive from peer {addr}");
-            return Ok(true);
-        }
-
-        // Read the full message with better error handling
-        let mut msg_buf = vec![0u8; msg_len];
-        match timeout(READ_TIMEOUT, stream.read_exact(&mut msg_buf)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                debug!("🔌 Connection error reading message from peer {addr}: {e}");
-                return Ok(false); // Connection closed
-            }
-            Err(_) => {
-                debug!("⏰ Timeout reading message from peer {addr}");
-                return Err("deadline has elapsed".into()); // Let caller handle timeout
-            }
-        }
-
-        // Reconstruct the full message buffer
-        let mut full_msg = Vec::with_capacity(4 + msg_len);
-        full_msg.extend_from_slice(&len_buf);
-        full_msg.extend_from_slice(&msg_buf);
-
-        // Parse message
-        let message = Message::deserialize(&full_msg).ok_or("Failed to deserialize message")?;
-
-        self.process_message(message, addr).await?;
-        Ok(true)
     }
 
     /// Process a received message from a peer
@@ -666,8 +618,9 @@ impl BitTorrentClient {
     /// Try to download blocks from a peer
     async fn try_download_blocks(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut OwnedWriteHalf,
         addr: &SocketAddr,
+        perf_cache: &mut PerformanceCache,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (can_download, peer_state) = {
             let connections = self.connections.lock().await;
@@ -704,7 +657,7 @@ impl BitTorrentClient {
         }
 
         // Batch multiple block requests to reduce lock contention
-        self.try_download_blocks_batched(stream, addr).await?;
+        self.try_download_blocks_batched(stream, addr, perf_cache).await?;
 
         Ok(())
     }
@@ -712,7 +665,7 @@ impl BitTorrentClient {
     /// Request a block from a peer
     async fn request_block(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut OwnedWriteHalf,
         block_info: BlockInfo,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let request_msg = Message {
@@ -754,33 +707,32 @@ impl BitTorrentClient {
     /// Optimized batched block downloading with reduced lock contention
     async fn try_download_blocks_batched(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut OwnedWriteHalf,
         addr: &SocketAddr,
+        perf_cache: &mut PerformanceCache,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Get multiple blocks to request in a single lock acquisition
         let blocks_to_request = {
             let mut download_state = self.download_state.lock().await;
             let connections = self.connections.lock().await;
-            let mut perf_cache = self.perf_cache.lock().await;
 
             perf_cache.clear();
 
             if let Some(conn) = connections.get(addr)
                 && let Some(ref bitfield) = conn.bitfield
             {
-                // Reuse the buffer instead of allocating
                 perf_cache
                     .bitfield_buffer
                     .extend((0..download_state.total_pieces).map(|i| bitfield.has_piece(i)));
 
-                // Get current pipeline depth to check capacity efficiently
                 let current_pending = conn.pending_requests.len();
                 let available_slots = MAX_PIPELINE_DEPTH.saturating_sub(current_pending);
                 let max_blocks = std::cmp::min(BATCH_SIZE, available_slots);
 
-                // Batch multiple block picks to reduce lock acquisitions
+                let piece_offset = perf_cache.piece_offset;
                 for _ in 0..max_blocks {
-                    if let Some(block_info) = download_state.pick_block(&perf_cache.bitfield_buffer)
+                    if let Some(block_info) =
+                        download_state.pick_block(&perf_cache.bitfield_buffer, piece_offset)
                     {
                         download_state.mark_block_requested(block_info.clone());
                         perf_cache.block_batch.push(block_info);
@@ -790,7 +742,7 @@ impl BitTorrentClient {
                 }
             }
 
-            perf_cache.block_batch.clone() // Only clone the result batch
+            perf_cache.block_batch.clone()
         };
 
         if blocks_to_request.is_empty() {
@@ -902,7 +854,7 @@ impl BitTorrentClient {
     /// Send keep-alive message if needed
     async fn send_keep_alive_if_needed(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut OwnedWriteHalf,
         addr: &SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let should_send_keepalive = {
@@ -1125,6 +1077,42 @@ impl BitTorrentClient {
     }
 }
 
+/// Reads a single BitTorrent message from the read half of a peer connection.
+/// Keep-alive frames (length == 0) are consumed transparently.
+/// Returns `Ok(None)` on a clean EOF.
+async fn read_raw_message(
+    stream: &mut OwnedReadHalf,
+) -> Result<Option<Message>, Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        let mut len_buf = [0u8; 4];
+        match stream.read_exact(&mut len_buf).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+
+        let msg_len = u32::from_be_bytes(len_buf) as usize;
+        if msg_len == 0 {
+            // keep-alive — skip and read the next frame
+            continue;
+        }
+
+        let mut msg_buf = vec![0u8; msg_len];
+        match stream.read_exact(&mut msg_buf).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+
+        let mut full_msg = Vec::with_capacity(4 + msg_len);
+        full_msg.extend_from_slice(&len_buf);
+        full_msg.extend_from_slice(&msg_buf);
+
+        let message = Message::deserialize(&full_msg).ok_or("Failed to deserialize message")?;
+        return Ok(Some(message));
+    }
+}
+
 impl Clone for BitTorrentClient {
     fn clone(&self) -> Self {
         Self {
@@ -1132,7 +1120,6 @@ impl Clone for BitTorrentClient {
             connections: Arc::clone(&self.connections),
             pipeline_stats: Arc::clone(&self.pipeline_stats),
             peer_id: self.peer_id,
-            perf_cache: Arc::clone(&self.perf_cache),
         }
     }
 }

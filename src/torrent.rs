@@ -189,39 +189,35 @@ pub fn parse_info_dict_bytes(
 
 pub fn parse_magnet_link(magnet: &str) -> Result<Magnet, Box<dyn std::error::Error>> {
     let url = Url::parse(magnet)?;
-    let mut magnet = Magnet {
-        infohash: [0u8; 20],
-        display_name: None,
-        trackers: Vec::new(),
-        file_size: None,
-    };
+    let mut infohash: Option<[u8; 20]> = None;
+    let mut display_name = None;
+    let mut trackers = Vec::new();
+    let mut file_size = None;
 
-    // Process query parameters directly
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
             "xt" => {
                 if let Some(hex) = value.strip_prefix("urn:btih:")
-                    && let Ok(infohash) = <[u8; 20]>::from_hex(hex)
+                    && let Ok(hash) = <[u8; 20]>::from_hex(hex)
                 {
-                    magnet.infohash = infohash;
-                };
+                    infohash = Some(hash);
+                }
             }
-            "tr" => {
-                magnet.trackers.push(value.into_owned());
-            }
-            "dn" => {
-                magnet.display_name = Some(value.into_owned());
-            }
+            "tr" => trackers.push(value.into_owned()),
+            "dn" => display_name = Some(value.into_owned()),
             "xl" => {
                 if let Ok(size) = value.parse() {
-                    magnet.file_size = Some(size);
+                    file_size = Some(size);
                 }
             }
             _ => {}
         }
     }
 
-    Ok(magnet)
+    let infohash =
+        infohash.ok_or("Missing 'xt' parameter or invalid infohash format")?;
+
+    Ok(Magnet { infohash, display_name, trackers, file_size })
 }
 
 #[cfg(test)]
