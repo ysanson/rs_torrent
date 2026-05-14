@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+use crate::peer::message::Bitfield;
 use crate::torrent::{Infohash, PieceHash};
 
 const PIECE_BLOCK_SIZE: usize = 16384; // 16KB blocks
@@ -28,6 +29,7 @@ pub struct DownloadState {
     pub requested_blocks: HashSet<BlockInfo>, // Which blocks are currently being requested
     pub pieces_hash: Vec<PieceHash>,  // SHA1 hashes for each piece
     pub total_size: u64,              // Total size of all data
+    pub uploaded: u64,                // Total bytes uploaded to peers
 }
 
 impl DownloadState {
@@ -48,6 +50,7 @@ impl DownloadState {
             requested_blocks: HashSet::new(),
             pieces_hash,
             total_size,
+            uploaded: 0,
         }
     }
 
@@ -256,6 +259,40 @@ impl DownloadState {
         completed
     }
 
+    /// Build a Bitfield representing which pieces we currently have.
+    pub fn build_bitfield(&self) -> Bitfield {
+        let mut bitfield: Vec<u8> = vec![0; self.total_pieces];
+        for (i, piece) in self.pieces.iter().enumerate() {
+            if piece.is_some() {
+                bitfield[i] = 1
+            }
+        }
+        Bitfield { bits: bitfield }
+    }
+
+    /// Extract a block from a completed piece to serve to a requesting peer.
+    /// Returns `None` if the piece is not downloaded or the range is out of bounds.
+    pub fn get_piece_block(
+        &self,
+        piece_index: usize,
+        begin: usize,
+        length: usize,
+    ) -> Option<Vec<u8>> {
+        if let Some(piece) = &self.pieces[piece_index] {
+            if begin + length > piece.len() {
+                return None;
+            }
+            Some(piece[begin..begin + length].to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// Record bytes uploaded to a peer.
+    pub fn record_upload(&mut self, bytes: u64) {
+        todo!()
+    }
+
     pub async fn write_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut file = File::create(path).await?;
         file.set_len(self.total_size).await?;
@@ -273,6 +310,111 @@ impl DownloadState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Step 1: build_bitfield ────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_bitfield_no_pieces_downloaded() {
+        let state = DownloadState::new(8, 16384, [0u8; 20], vec![[0u8; 20]; 8], 131072);
+        let bf = state.build_bitfield();
+        for i in 0..8 {
+            assert!(!bf.has_piece(i), "piece {i} should not be set");
+        }
+    }
+
+    #[test]
+    fn test_build_bitfield_some_pieces() {
+        let mut state = DownloadState::new(4, 16384, [0u8; 20], vec![[0u8; 20]; 4], 65536);
+        state.pieces[0] = Some(vec![0u8; 16384]);
+        state.pieces[2] = Some(vec![0u8; 16384]);
+        let bf = state.build_bitfield();
+        assert!(bf.has_piece(0));
+        assert!(!bf.has_piece(1));
+        assert!(bf.has_piece(2));
+        assert!(!bf.has_piece(3));
+    }
+
+    #[test]
+    fn test_build_bitfield_all_pieces() {
+        let mut state = DownloadState::new(4, 16384, [0u8; 20], vec![[0u8; 20]; 4], 65536);
+        for i in 0..4 {
+            state.pieces[i] = Some(vec![0u8; 16384]);
+        }
+        let bf = state.build_bitfield();
+        for i in 0..4 {
+            assert!(bf.has_piece(i), "piece {i} should be set");
+        }
+    }
+
+    #[test]
+    fn test_build_bitfield_size_matches_piece_count() {
+        // 9 pieces → ceil(9/8) = 2 bytes
+        let state = DownloadState::new(9, 16384, [0u8; 20], vec![[0u8; 20]; 9], 147456);
+        let bf = state.build_bitfield();
+        assert_eq!(bf.bits.len(), 2);
+    }
+
+    // ── Step 2: get_piece_block ───────────────────────────────────────────────
+
+    #[test]
+    fn test_get_piece_block_piece_not_downloaded() {
+        let state = DownloadState::new(3, 16384, [0u8; 20], vec![[0u8; 20]; 3], 49152);
+        assert!(state.get_piece_block(0, 0, 16384).is_none());
+    }
+
+    #[test]
+    fn test_get_piece_block_full_piece() {
+        let mut state = DownloadState::new(3, 16384, [0u8; 20], vec![[0u8; 20]; 3], 49152);
+        let data: Vec<u8> = (0u8..=255).cycle().take(16384).collect();
+        state.pieces[1] = Some(data.clone());
+        let result = state.get_piece_block(1, 0, 16384).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_get_piece_block_mid_slice() {
+        let mut state = DownloadState::new(1, 32768, [0u8; 20], vec![[0u8; 20]; 1], 32768);
+        let mut data = vec![0xAAu8; 16384];
+        data.extend(vec![0xBBu8; 16384]);
+        state.pieces[0] = Some(data);
+        // Second 16KB block
+        let result = state.get_piece_block(0, 16384, 16384).unwrap();
+        assert_eq!(result.len(), 16384);
+        assert!(result.iter().all(|&b| b == 0xBB));
+    }
+
+    #[test]
+    fn test_get_piece_block_range_out_of_bounds() {
+        let mut state = DownloadState::new(1, 16384, [0u8; 20], vec![[0u8; 20]; 1], 16384);
+        state.pieces[0] = Some(vec![0u8; 16384]);
+        // begin + length exceeds piece size
+        assert!(state.get_piece_block(0, 8192, 16384).is_none());
+    }
+
+    #[test]
+    fn test_get_piece_block_index_out_of_bounds() {
+        let state = DownloadState::new(2, 16384, [0u8; 20], vec![[0u8; 20]; 2], 32768);
+        assert!(state.get_piece_block(99, 0, 16384).is_none());
+    }
+
+    // ── Step 4: upload tracking ───────────────────────────────────────────────
+
+    #[test]
+    fn test_uploaded_initial_value() {
+        let state = DownloadState::new(2, 16384, [0u8; 20], vec![[0u8; 20]; 2], 32768);
+        assert_eq!(state.uploaded, 0);
+    }
+
+    #[test]
+    fn test_record_upload_increments() {
+        let mut state = DownloadState::new(1, 16384, [0u8; 20], vec![[0u8; 20]; 1], 16384);
+        state.record_upload(16384);
+        assert_eq!(state.uploaded, 16384);
+        state.record_upload(1024);
+        assert_eq!(state.uploaded, 17408);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_block_info_creation() {

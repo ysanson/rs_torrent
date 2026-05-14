@@ -317,11 +317,17 @@ impl BitTorrentClient {
         }
 
         // Send interested + unchoke before splitting the stream
-        let interested_msg = Message { kind: MessageId::Interested, payload: vec![] };
+        let interested_msg = Message {
+            kind: MessageId::Interested,
+            payload: vec![],
+        };
         stream.write_all(&interested_msg.serialize()).await?;
         debug!("📤 Sent 'interested' to peer {addr}");
 
-        let unchoke_msg = Message { kind: MessageId::Unchoke, payload: vec![] };
+        let unchoke_msg = Message {
+            kind: MessageId::Unchoke,
+            payload: vec![],
+        };
         stream.write_all(&unchoke_msg.serialize()).await?;
         debug!("📤 Sent 'unchoke' to peer {addr}");
 
@@ -366,7 +372,7 @@ impl BitTorrentClient {
                 msg_opt = msg_rx.recv() => {
                     match msg_opt {
                         Some(msg) => {
-                            if let Err(e) = self.process_message(msg, &addr).await {
+                            if let Err(e) = self.process_message(msg, &addr, &mut write_half).await {
                                 debug!("Error processing message from {addr}: {e}");
                                 break;
                             }
@@ -384,7 +390,10 @@ impl BitTorrentClient {
                 debug!("Error handling timeouts for peer {addr}: {e}");
             }
 
-            if let Err(e) = self.try_download_blocks(&mut write_half, &addr, &mut perf_cache).await {
+            if let Err(e) = self
+                .try_download_blocks(&mut write_half, &addr, &mut perf_cache)
+                .await
+            {
                 debug!("Error downloading from peer {addr}: {e}");
                 break;
             }
@@ -437,6 +446,7 @@ impl BitTorrentClient {
         &self,
         message: Message,
         addr: &SocketAddr,
+        write_half: &mut OwnedWriteHalf,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match message.kind {
             MessageId::Choke => {
@@ -503,7 +513,7 @@ impl BitTorrentClient {
                 self.handle_piece_message(message, addr).await?;
             }
             MessageId::Request => {
-                // We don't handle incoming requests in this simple client
+                self.handle_piece_request(message, addr, write_half).await?;
             }
             MessageId::Cancel => {
                 // We don't handle cancellations in this simple client
@@ -512,6 +522,52 @@ impl BitTorrentClient {
                 // Not yet implemented.
             }
         }
+        Ok(())
+    }
+
+    async fn handle_piece_request(
+        &self,
+        message: Message,
+        addr: &SocketAddr,
+        write_half: &mut OwnedWriteHalf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let piece_index = u32::from_be_bytes([
+            message.payload[0],
+            message.payload[1],
+            message.payload[2],
+            message.payload[3],
+        ]) as usize;
+        let begin = u32::from_be_bytes([
+            message.payload[4],
+            message.payload[5],
+            message.payload[6],
+            message.payload[7],
+        ]) as usize;
+        let length = u32::from_be_bytes([
+            message.payload[8],
+            message.payload[9],
+            message.payload[10],
+            message.payload[11],
+        ]) as usize;
+        if length > 16 * 1024 {
+            return Ok(());
+        }
+        let connections = self.connections.lock().await;
+        let am_choking = connections.get(addr).map_or(true, |c| c.am_choking);
+        drop(connections);
+        if am_choking {
+            return Ok(());
+        }
+
+        let download_state = self.download_state.lock().await;
+        if let Some(piece) = download_state.get_piece_block(piece_index, begin, length) {
+            let piece_msg = Message {
+                kind: MessageId::Piece,
+                payload: [&message.payload[0..8], &piece].concat(),
+            };
+            write_half.write_all(&piece_msg.serialize()).await?;
+        }
+        drop(download_state);
         Ok(())
     }
 
@@ -657,7 +713,8 @@ impl BitTorrentClient {
         }
 
         // Batch multiple block requests to reduce lock contention
-        self.try_download_blocks_batched(stream, addr, perf_cache).await?;
+        self.try_download_blocks_batched(stream, addr, perf_cache)
+            .await?;
 
         Ok(())
     }
