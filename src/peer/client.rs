@@ -355,14 +355,9 @@ impl BitTorrentClient {
         let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(32);
 
         let reader_task = tokio::spawn(async move {
-            loop {
-                match read_raw_message(&mut read_half).await {
-                    Ok(Some(msg)) => {
-                        if msg_tx.send(msg).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) | Err(_) => break,
+            while let Ok(Some(msg)) = read_raw_message(&mut read_half).await {
+                if msg_tx.send(msg).await.is_err() {
+                    break;
                 }
             }
         });
@@ -539,7 +534,7 @@ impl BitTorrentClient {
                 return Ok(());
             }
             let connections = self.connections.lock().await;
-            let am_choking = connections.get(addr).map_or(true, |c| c.am_choking);
+            let am_choking = connections.get(addr).is_none_or(|c| c.am_choking);
             drop(connections);
             if am_choking {
                 return Ok(());

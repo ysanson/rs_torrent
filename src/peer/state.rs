@@ -61,11 +61,10 @@ impl DownloadState {
         let total = self.pieces.len();
         for i in 0..total {
             let idx = (start_piece + i) % total;
-            if self.pieces[idx].is_none() && peer_bitfield.get(idx).copied().unwrap_or(false) {
-                if let Some(block_info) = self.find_next_block_in_piece(idx) {
+            if self.pieces[idx].is_none() && peer_bitfield.get(idx).copied().unwrap_or(false)
+                && let Some(block_info) = self.find_next_block_in_piece(idx) {
                     return Some(block_info);
                 }
-            }
         }
         None
     }

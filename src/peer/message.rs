@@ -161,7 +161,7 @@ impl TryFrom<&Message> for PieceRequest {
 /// Build a `Piece` response message from a data slice.
 /// Payload layout: piece_index (u32 BE) | begin (u32 BE) | data
 pub fn build_piece_response(piece_index: u32, begin: u32, data: &[u8]) -> Message {
-    return Message {
+    Message {
         kind: MessageId::Piece,
         payload: [
             u32::to_be_bytes(piece_index).as_ref(),
@@ -169,7 +169,7 @@ pub fn build_piece_response(piece_index: u32, begin: u32, data: &[u8]) -> Messag
             data,
         ]
         .concat(),
-    };
+    }
 }
 
 #[repr(u8)]
