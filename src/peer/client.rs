@@ -1,6 +1,9 @@
 use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
-use crate::peer::message::{Bitfield, ExtendedMessage, ExtendedMessageId, Message, MessageId};
+use crate::peer::message::build_piece_response;
+use crate::peer::message::{
+    Bitfield, ExtendedMessage, ExtendedMessageId, Message, MessageId, PieceRequest,
+};
 use crate::peer::state::{BlockInfo, DownloadState};
 
 use log::{debug, error};
@@ -531,43 +534,30 @@ impl BitTorrentClient {
         addr: &SocketAddr,
         write_half: &mut OwnedWriteHalf,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let piece_index = u32::from_be_bytes([
-            message.payload[0],
-            message.payload[1],
-            message.payload[2],
-            message.payload[3],
-        ]) as usize;
-        let begin = u32::from_be_bytes([
-            message.payload[4],
-            message.payload[5],
-            message.payload[6],
-            message.payload[7],
-        ]) as usize;
-        let length = u32::from_be_bytes([
-            message.payload[8],
-            message.payload[9],
-            message.payload[10],
-            message.payload[11],
-        ]) as usize;
-        if length > 16 * 1024 {
-            return Ok(());
-        }
-        let connections = self.connections.lock().await;
-        let am_choking = connections.get(addr).map_or(true, |c| c.am_choking);
-        drop(connections);
-        if am_choking {
-            return Ok(());
-        }
+        if let Ok(piece_request) = PieceRequest::try_from(&message) {
+            if piece_request.length > 16 * 1024 {
+                return Ok(());
+            }
+            let connections = self.connections.lock().await;
+            let am_choking = connections.get(addr).map_or(true, |c| c.am_choking);
+            drop(connections);
+            if am_choking {
+                return Ok(());
+            }
 
-        let download_state = self.download_state.lock().await;
-        if let Some(piece) = download_state.get_piece_block(piece_index, begin, length) {
-            let piece_msg = Message {
-                kind: MessageId::Piece,
-                payload: [&message.payload[0..8], &piece].concat(),
-            };
-            write_half.write_all(&piece_msg.serialize()).await?;
+            let mut download_state = self.download_state.lock().await;
+            if let Some(piece) = download_state.get_piece_block(
+                piece_request.piece_index as usize,
+                piece_request.begin as usize,
+                piece_request.length as usize,
+            ) {
+                let message =
+                    build_piece_response(piece_request.piece_index, piece_request.begin, &piece);
+                write_half.write_all(&message.serialize()).await?;
+                download_state.record_upload(piece_request.length as u64);
+            }
+            drop(download_state);
         }
-        drop(download_state);
         Ok(())
     }
 

@@ -261,13 +261,13 @@ impl DownloadState {
 
     /// Build a Bitfield representing which pieces we currently have.
     pub fn build_bitfield(&self) -> Bitfield {
-        let mut bitfield: Vec<u8> = vec![0; self.total_pieces];
+        let mut bitfield = Bitfield::from_piece_count(self.total_pieces);
         for (i, piece) in self.pieces.iter().enumerate() {
             if piece.is_some() {
-                bitfield[i] = 1
+                bitfield.set_piece(i);
             }
         }
-        Bitfield { bits: bitfield }
+        bitfield
     }
 
     /// Extract a block from a completed piece to serve to a requesting peer.
@@ -278,6 +278,9 @@ impl DownloadState {
         begin: usize,
         length: usize,
     ) -> Option<Vec<u8>> {
+        if piece_index >= self.total_pieces {
+            return None;
+        }
         if let Some(piece) = &self.pieces[piece_index] {
             if begin + length > piece.len() {
                 return None;
@@ -290,7 +293,7 @@ impl DownloadState {
 
     /// Record bytes uploaded to a peer.
     pub fn record_upload(&mut self, bytes: u64) {
-        todo!()
+        self.uploaded += bytes;
     }
 
     pub async fn write_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
