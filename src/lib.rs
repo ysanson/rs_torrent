@@ -120,6 +120,7 @@ pub async fn download_from_torrent_file(
     loop {
         let (downloaded_pieces, total_pieces) = client.get_progress().await;
         let (downloaded_blocks, total_blocks) = client.get_block_progress().await;
+        let uploaded = client.get_uploaded_bytes().await;
         let pipeline_stats = client.get_pipeline_stats().await;
         let peer_info = client.get_peer_info().await;
 
@@ -129,6 +130,7 @@ pub async fn download_from_torrent_file(
         println!(
             "Progress: {downloaded_pieces}/{total_pieces} pieces ({piece_progress:.1}%) | {downloaded_blocks}/{total_blocks} blocks ({block_progress:.1}%)"
         );
+        println!("Uploaded: {uploaded} bytes");
 
         // Show pipelining statistics
         println!(

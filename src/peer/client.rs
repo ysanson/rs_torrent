@@ -989,6 +989,11 @@ impl BitTorrentClient {
         )
     }
 
+    pub async fn get_uploaded_bytes(&self) -> u64 {
+        let download_state = self.download_state.lock().await;
+        download_state.uploaded
+    }
+
     /// Check if download is complete
     pub async fn is_complete(&self) -> bool {
         let download_state = self.download_state.lock().await;
