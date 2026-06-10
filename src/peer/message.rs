@@ -119,6 +119,7 @@ impl TryFrom<Message> for Bitfield {
 }
 
 /// Parsed payload of an incoming `Request` message.
+#[derive(Debug, Clone)]
 pub struct PieceRequest {
     pub piece_index: u32,
     pub begin: u32,
@@ -129,7 +130,7 @@ impl TryFrom<&Message> for PieceRequest {
     type Error = &'static str;
 
     fn try_from(msg: &Message) -> Result<Self, Self::Error> {
-        if msg.kind != MessageId::Request {
+        if msg.kind != MessageId::Request && msg.kind != MessageId::Cancel {
             return Err("Not a request message");
         }
         if msg.payload.len() != 12 {

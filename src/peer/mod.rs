@@ -1,10 +1,13 @@
 use std::net::Ipv4Addr;
 
 pub mod client;
+pub mod connection;
 pub mod handshake;
 pub mod message;
 pub mod metadata;
+pub mod pool;
 pub mod state;
+pub mod stats;
 
 const PSTR: &str = "BitTorrent protocol";
 const PSTR_LEN: u8 = PSTR.len() as u8; // always 19

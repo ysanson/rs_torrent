@@ -1,13 +1,14 @@
 use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
 use crate::peer::message::build_piece_response;
-use crate::peer::message::{
-    Bitfield, ExtendedMessage, ExtendedMessageId, Message, MessageId, PieceRequest,
-};
+use crate::peer::message::{Bitfield, Message, MessageId, PieceRequest};
 use crate::peer::state::{BlockInfo, DownloadState};
 
+use super::connection::{PeerConnection, MAX_PIPELINE_DEPTH};
+use super::pool::IndexedConnections;
+use super::stats::{BATCH_SIZE, PerformanceCache, PipelineStats};
+
 use log::{debug, error};
-use rustc_hash::FxHashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,229 +21,7 @@ use tokio::time::timeout;
 pub const PIECE_BLOCK_SIZE: usize = 16384;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_PIPELINE_DEPTH: usize = 10;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(120);
-const BATCH_SIZE: usize = 16;
-
-/// Represents the state of a connection to a peer
-#[derive(Debug, Clone)]
-pub struct PeerConnection {
-    pub peer: Peer,
-    pub am_choking: bool,
-    pub am_interested: bool,
-    pub peer_choking: bool,
-    pub peer_interested: bool,
-    pub bitfield: Option<Bitfield>,
-    pub pending_requests: FxHashMap<BlockInfo, std::time::Instant>, // Blocks we've requested with timestamps
-    pub last_request_time: Option<std::time::Instant>,
-}
-
-impl PeerConnection {
-    pub fn new(peer: Peer) -> Self {
-        Self {
-            peer,
-            am_choking: true,
-            am_interested: false,
-            peer_choking: true,
-            peer_interested: false,
-            bitfield: None,
-            pending_requests: FxHashMap::default(),
-            last_request_time: None,
-        }
-    }
-
-    pub fn has_piece(&self, index: usize) -> bool {
-        self.bitfield
-            .as_ref()
-            .map(|bf| bf.has_piece(index))
-            .unwrap_or(false)
-    }
-
-    pub fn can_download(&self) -> bool {
-        !self.peer_choking && self.am_interested
-    }
-
-    pub fn can_pipeline_request(&self) -> bool {
-        self.can_download() && self.pending_requests.len() < MAX_PIPELINE_DEPTH
-    }
-
-    pub fn add_pending_request(&mut self, block_info: BlockInfo) {
-        let now = std::time::Instant::now();
-        self.pending_requests.insert(block_info, now);
-        self.last_request_time = Some(now);
-    }
-
-    pub fn remove_pending_request(&mut self, block_info: &BlockInfo) -> bool {
-        self.pending_requests.remove(block_info).is_some()
-    }
-
-    pub fn has_pending_requests(&self) -> bool {
-        !self.pending_requests.is_empty()
-    }
-
-    pub fn get_timed_out_requests(&self) -> Vec<BlockInfo> {
-        let now = std::time::Instant::now();
-        self.pending_requests
-            .iter()
-            .filter_map(|(block_info, timestamp)| {
-                if now.duration_since(*timestamp) > REQUEST_TIMEOUT {
-                    Some(block_info.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    pub fn clear_timed_out_requests(&mut self) -> Vec<BlockInfo> {
-        let timed_out = self.get_timed_out_requests();
-        for block_info in &timed_out {
-            self.pending_requests.remove(block_info);
-        }
-        timed_out
-    }
-}
-
-/// Statistics for pipelining performance
-#[derive(Debug, Clone, Default)]
-pub struct PipelineStats {
-    pub total_requests_sent: u64,
-    pub total_responses_received: u64,
-    pub total_timeouts: u64,
-    pub max_pipeline_depth_seen: usize,
-    pub average_response_time_ms: f64,
-}
-
-/// Performance cache to eliminate allocations in hot paths (one instance per peer)
-#[derive(Debug)]
-pub struct PerformanceCache {
-    pub bitfield_buffer: Vec<bool>,
-    pub block_batch: Vec<BlockInfo>,
-    /// Starting piece index for block picking, derived from peer address to spread work
-    pub piece_offset: usize,
-}
-
-impl PerformanceCache {
-    pub fn new_for_peer(total_pieces: usize, addr: &SocketAddr) -> Self {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        addr.hash(&mut hasher);
-        let piece_offset = if total_pieces > 0 {
-            (hasher.finish() as usize) % total_pieces
-        } else {
-            0
-        };
-        Self {
-            bitfield_buffer: Vec::with_capacity(total_pieces),
-            block_batch: Vec::with_capacity(BATCH_SIZE),
-            piece_offset,
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.bitfield_buffer.clear();
-        self.block_batch.clear();
-    }
-}
-
-/// Indexed connections for more efficient peer lookups
-#[derive(Debug)]
-pub struct IndexedConnections {
-    connections: Vec<Option<PeerConnection>>,
-    addr_to_index: FxHashMap<SocketAddr, usize>,
-    free_indices: Vec<usize>,
-}
-
-impl Default for IndexedConnections {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl IndexedConnections {
-    pub fn new() -> Self {
-        Self {
-            connections: Vec::new(),
-            addr_to_index: FxHashMap::default(),
-            free_indices: Vec::new(),
-        }
-    }
-
-    pub fn insert(&mut self, addr: SocketAddr, conn: PeerConnection) {
-        if let Some(index) = self.free_indices.pop() {
-            self.connections[index] = Some(conn);
-            self.addr_to_index.insert(addr, index);
-        } else {
-            let index = self.connections.len();
-            self.connections.push(Some(conn));
-            self.addr_to_index.insert(addr, index);
-        }
-    }
-
-    pub fn get(&self, addr: &SocketAddr) -> Option<&PeerConnection> {
-        self.addr_to_index
-            .get(addr)
-            .and_then(|&idx| self.connections.get(idx))
-            .and_then(|opt| opt.as_ref())
-    }
-
-    pub fn get_mut(&mut self, addr: &SocketAddr) -> Option<&mut PeerConnection> {
-        self.addr_to_index
-            .get(addr)
-            .and_then(|&idx| self.connections.get_mut(idx))
-            .and_then(|opt| opt.as_mut())
-    }
-
-    pub fn remove(&mut self, addr: &SocketAddr) -> Option<PeerConnection> {
-        if let Some(&index) = self.addr_to_index.get(addr) {
-            self.addr_to_index.remove(addr);
-            let removed = self.connections[index].take();
-            self.free_indices.push(index);
-            removed
-        } else {
-            None
-        }
-    }
-
-    pub fn contains_key(&self, addr: &SocketAddr) -> bool {
-        self.addr_to_index.contains_key(addr)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.addr_to_index.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.addr_to_index.len()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&SocketAddr, &PeerConnection)> {
-        self.addr_to_index
-            .iter()
-            .filter_map(move |(addr, &idx)| self.connections[idx].as_ref().map(|conn| (addr, conn)))
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&SocketAddr, &mut PeerConnection)> {
-        // This is a bit more complex due to borrowing rules, but more efficient than HashMap
-        let addr_to_index = &self.addr_to_index;
-        self.connections
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(idx, conn_opt)| {
-                if let Some(conn) = conn_opt.as_mut() {
-                    // Find the address for this index
-                    addr_to_index
-                        .iter()
-                        .find(|&(_, &i)| i == idx)
-                        .map(|(addr, _)| (addr, conn))
-                } else {
-                    None
-                }
-            })
-    }
-}
 
 /// Main BitTorrent client for downloading from peers
 pub struct BitTorrentClient {
@@ -270,13 +49,13 @@ impl BitTorrentClient {
         let addr = SocketAddr::from((peer.ip_addr, peer.port));
         let stream = timeout(CONNECTION_TIMEOUT, TcpStream::connect(addr)).await??;
 
-        // Perform handshake
-        let download_state = self.download_state.lock().await;
-        let handshake = Handshake {
-            infohash: download_state.info_hash,
-            peer_id: self.peer_id,
+        let handshake = {
+            let download_state = self.download_state.lock().await;
+            Handshake {
+                infohash: download_state.info_hash,
+                peer_id: self.peer_id,
+            }
         };
-        drop(download_state);
 
         self.perform_handshake(stream, handshake).await
     }
@@ -370,7 +149,7 @@ impl BitTorrentClient {
                 msg_opt = msg_rx.recv() => {
                     match msg_opt {
                         Some(msg) => {
-                            if let Err(e) = self.process_message(msg, &addr, &mut write_half).await {
+                            if let Err(e) = self.process_message(msg, &addr).await {
                                 debug!("Error processing message from {addr}: {e}");
                                 break;
                             }
@@ -396,18 +175,25 @@ impl BitTorrentClient {
                 break;
             }
 
+            if let Err(e) = self.flush_upload_queue(&addr, &mut write_half).await {
+                debug!("Error flushing upload queue for peer {addr}: {e}");
+                break;
+            }
+
             // Print diagnostics every 60 seconds
-            {
+            let should_diagnose = {
                 let connections = self.connections.lock().await;
-                if let Some(conn) = connections.get(&addr)
-                    && conn
-                        .last_request_time
-                        .map(|t| t.elapsed().as_secs() > 60)
-                        .unwrap_or(true)
-                {
-                    drop(connections);
-                    self.print_peer_diagnostics().await;
-                }
+                connections
+                    .get(&addr)
+                    .map(|conn| {
+                        conn.last_request_time
+                            .map(|t| t.elapsed().as_secs() > 60)
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(false)
+            };
+            if should_diagnose {
+                self.print_peer_diagnostics().await;
             }
 
             if let Err(e) = self.send_keep_alive_if_needed(&mut write_half, &addr).await {
@@ -444,7 +230,6 @@ impl BitTorrentClient {
         &self,
         message: Message,
         addr: &SocketAddr,
-        write_half: &mut OwnedWriteHalf,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match message.kind {
             MessageId::Choke => {
@@ -511,10 +296,19 @@ impl BitTorrentClient {
                 self.handle_piece_message(message, addr).await?;
             }
             MessageId::Request => {
-                self.handle_piece_request(message, addr, write_half).await?;
+                self.handle_piece_request(message, addr).await?;
             }
             MessageId::Cancel => {
-                // We don't handle cancellations in this simple client
+                if let Ok(cancel) = PieceRequest::try_from(&message) {
+                    let mut connections = self.connections.lock().await;
+                    if let Some(conn) = connections.get_mut(addr) {
+                        conn.pending_uploads.retain(|p| {
+                            p.piece_index != cancel.piece_index
+                                || p.begin != cancel.begin
+                                || p.length != cancel.length
+                        });
+                    }
+                }
             }
             MessageId::Extended => {
                 // Not yet implemented.
@@ -527,31 +321,16 @@ impl BitTorrentClient {
         &self,
         message: Message,
         addr: &SocketAddr,
-        write_half: &mut OwnedWriteHalf,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(piece_request) = PieceRequest::try_from(&message) {
             if piece_request.length > 16 * 1024 {
                 return Ok(());
             }
-            let connections = self.connections.lock().await;
-            let am_choking = connections.get(addr).is_none_or(|c| c.am_choking);
-            drop(connections);
-            if am_choking {
-                return Ok(());
-            }
-
-            let mut download_state = self.download_state.lock().await;
-            if let Some(piece) = download_state.get_piece_block(
-                piece_request.piece_index as usize,
-                piece_request.begin as usize,
-                piece_request.length as usize,
-            ) {
-                let message =
-                    build_piece_response(piece_request.piece_index, piece_request.begin, &piece);
-                write_half.write_all(&message.serialize()).await?;
-                download_state.record_upload(piece_request.length as u64);
-            }
-            drop(download_state);
+            let mut connections = self.connections.lock().await;
+            if let Some(conn) = connections.get_mut(addr)
+                && !conn.am_choking && conn.can_queue_upload() {
+                    conn.pending_uploads.push_back(piece_request);
+                }
         }
         Ok(())
     }
@@ -663,7 +442,7 @@ impl BitTorrentClient {
         addr: &SocketAddr,
         perf_cache: &mut PerformanceCache,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (can_download, peer_state) = {
+        let (can_download, peer_state, should_log) = {
             let connections = self.connections.lock().await;
             if let Some(conn) = connections.get(addr) {
                 let can_download = conn.can_download();
@@ -675,29 +454,23 @@ impl BitTorrentClient {
                     conn.peer_interested,
                     conn.bitfield.is_some()
                 );
-                (can_download, state)
+                let should_log = conn
+                    .last_request_time
+                    .map(|last| last.elapsed().as_secs() > 10)
+                    .unwrap_or(true);
+                (can_download, state, should_log)
             } else {
-                (false, "no connection".to_string())
+                (false, "no connection".to_string(), true)
             }
         };
 
         if !can_download {
-            // Only log occasionally to avoid spam
-            let should_log = {
-                let connections = self.connections.lock().await;
-                connections
-                    .get(addr)
-                    .and_then(|conn| conn.last_request_time)
-                    .map(|last| last.elapsed().as_secs() > 10)
-                    .unwrap_or(true)
-            };
             if should_log {
                 debug!("🚫 Peer {addr} not ready: {peer_state}");
             }
-            return Ok(()); // Don't error, just skip this cycle
+            return Ok(());
         }
 
-        // Batch multiple block requests to reduce lock contention
         self.try_download_blocks_batched(stream, addr, perf_cache)
             .await?;
 
@@ -709,6 +482,7 @@ impl BitTorrentClient {
         &self,
         stream: &mut OwnedWriteHalf,
         block_info: BlockInfo,
+        pipeline_depth: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let request_msg = Message {
             kind: MessageId::Request,
@@ -722,18 +496,6 @@ impl BitTorrentClient {
         };
 
         stream.write_all(&request_msg.serialize()).await?;
-
-        // Get pipeline depth for logging
-        let pipeline_depth = {
-            let connections = self.connections.lock().await;
-            connections
-                .get(&SocketAddr::from((
-                    stream.peer_addr()?.ip(),
-                    stream.peer_addr()?.port(),
-                )))
-                .map(|conn| conn.pending_requests.len())
-                .unwrap_or(0)
-        };
 
         debug!(
             "📤 Requested block: piece {}, offset {}, length {} from peer {} (pipeline: {})",
@@ -754,12 +516,13 @@ impl BitTorrentClient {
         perf_cache: &mut PerformanceCache,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Get multiple blocks to request in a single lock acquisition
-        let blocks_to_request = {
+        let (blocks_to_request, pipeline_depth) = {
             let mut download_state = self.download_state.lock().await;
             let connections = self.connections.lock().await;
 
             perf_cache.clear();
 
+            let mut current_pending = 0;
             if let Some(conn) = connections.get(addr)
                 && let Some(ref bitfield) = conn.bitfield
             {
@@ -767,7 +530,7 @@ impl BitTorrentClient {
                     .bitfield_buffer
                     .extend((0..download_state.total_pieces).map(|i| bitfield.has_piece(i)));
 
-                let current_pending = conn.pending_requests.len();
+                current_pending = conn.pending_requests.len();
                 let available_slots = MAX_PIPELINE_DEPTH.saturating_sub(current_pending);
                 let max_blocks = std::cmp::min(BATCH_SIZE, available_slots);
 
@@ -784,7 +547,8 @@ impl BitTorrentClient {
                 }
             }
 
-            perf_cache.block_batch.clone()
+            let depth = current_pending + perf_cache.block_batch.len();
+            (perf_cache.block_batch.clone(), depth)
         };
 
         if blocks_to_request.is_empty() {
@@ -805,7 +569,11 @@ impl BitTorrentClient {
         let mut requests_sent = 0;
         let mut failed_blocks = Vec::new();
         for block_info in &blocks_to_request {
-            if self.request_block(stream, block_info.clone()).await.is_ok() {
+            if self
+                .request_block(stream, block_info.clone(), pipeline_depth)
+                .await
+                .is_ok()
+            {
                 requests_sent += 1;
             } else {
                 // Collect remaining blocks that weren't sent
@@ -835,18 +603,10 @@ impl BitTorrentClient {
 
         // Update stats once for the entire batch
         if requests_sent > 0 {
-            let current_depth = {
-                let connections = self.connections.lock().await;
-                connections
-                    .get(addr)
-                    .map(|conn| conn.pending_requests.len())
-                    .unwrap_or(0)
-            };
-
             let mut stats = self.pipeline_stats.lock().await;
             stats.total_requests_sent += requests_sent as u64;
-            if current_depth > stats.max_pipeline_depth_seen {
-                stats.max_pipeline_depth_seen = current_depth;
+            if pipeline_depth > stats.max_pipeline_depth_seen {
+                stats.max_pipeline_depth_seen = pipeline_depth;
             }
         }
 
@@ -1088,39 +848,43 @@ impl BitTorrentClient {
         self.download_state.lock().await.write_to_file(path).await
     }
 
-    pub fn create_extension_handshake() -> Message {
-        let mut payload = Vec::new();
-        payload.push(ExtendedMessageId::Handshake as u8);
-        payload.extend_from_slice(b"d1:md11:ut_metadatai1ee1:me"); // Example extension handshake
-
-        Message {
-            kind: MessageId::Extended,
-            payload,
-        }
-    }
-
-    pub fn create_metadata_request(piece: u32) -> Message {
-        let mut payload = Vec::new();
-        payload.push(ExtendedMessageId::Metadata as u8);
-        payload.extend_from_slice(&piece.to_be_bytes());
-
-        Message {
-            kind: MessageId::Extended,
-            payload,
-        }
-    }
-
-    pub fn parse_metadata_response(payload: &[u8]) -> Option<Vec<u8>> {
-        if payload.is_empty() {
-            return None;
+    /// Flushes the upload queue for the given peer, sending any pending piece requests.
+    async fn flush_upload_queue(
+        &self,
+        addr: &SocketAddr,
+        write_half: &mut OwnedWriteHalf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut to_serve = Vec::new();
+        {
+            let mut connections = self.connections.lock().await;
+            if let Some(conn) = connections.get_mut(addr) {
+                for _ in 0..4 {
+                    match conn.pending_uploads.pop_front() {
+                        Some(req) => to_serve.push(req),
+                        None => break,
+                    }
+                }
+            }
         }
 
-        let extended_message = ExtendedMessage::deserialize(payload)?;
-        if extended_message.kind != ExtendedMessageId::Metadata {
-            return None;
+        if to_serve.is_empty() {
+            return Ok(());
         }
 
-        Some(extended_message.payload)
+        let mut download_state = self.download_state.lock().await;
+        for req in to_serve {
+            if let Some(data) = download_state.get_piece_block(
+                req.piece_index as usize,
+                req.begin as usize,
+                req.length as usize,
+            ) {
+                let msg = build_piece_response(req.piece_index, req.begin, &data);
+                write_half.write_all(&msg.serialize()).await?;
+                download_state.record_upload(req.length as u64);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1168,98 +932,5 @@ impl Clone for BitTorrentClient {
             pipeline_stats: Arc::clone(&self.pipeline_stats),
             peer_id: self.peer_id,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_peer_connection_creation() {
-        use std::net::Ipv4Addr;
-        let peer = Peer {
-            ip_addr: Ipv4Addr::new(192, 168, 1, 1),
-            port: 6881,
-        };
-        let conn = PeerConnection::new(peer);
-        assert!(conn.am_choking);
-        assert!(!conn.am_interested);
-        assert!(conn.peer_choking);
-        assert!(!conn.peer_interested);
-        assert!(conn.bitfield.is_none());
-        assert!(conn.pending_requests.is_empty());
-        assert!(conn.last_request_time.is_none());
-    }
-
-    #[test]
-    fn test_peer_connection_pipelining() {
-        use std::net::Ipv4Addr;
-        let peer = Peer {
-            ip_addr: Ipv4Addr::new(192, 168, 1, 1),
-            port: 6881,
-        };
-        let mut conn = PeerConnection::new(peer);
-
-        // Initially can't download because peer is choking
-        assert!(!conn.can_download());
-        assert!(!conn.can_pipeline_request());
-
-        // Unchoke and set interested
-        conn.peer_choking = false;
-        conn.am_interested = true;
-        assert!(conn.can_download());
-        assert!(conn.can_pipeline_request());
-
-        // Add requests up to pipeline depth
-        for i in 0..MAX_PIPELINE_DEPTH {
-            let block_info = BlockInfo {
-                piece_index: i,
-                offset: 0,
-                length: 16384,
-            };
-            conn.add_pending_request(block_info);
-        }
-
-        // Should not be able to pipeline more
-        assert!(!conn.can_pipeline_request());
-
-        // Remove one request
-        let block_info = BlockInfo {
-            piece_index: 0,
-            offset: 0,
-            length: 16384,
-        };
-        assert!(conn.remove_pending_request(&block_info));
-        assert!(conn.can_pipeline_request());
-    }
-
-    #[test]
-    fn test_request_timeout_handling() {
-        use std::net::Ipv4Addr;
-        let peer = Peer {
-            ip_addr: Ipv4Addr::new(192, 168, 1, 1),
-            port: 6881,
-        };
-        let mut conn = PeerConnection::new(peer);
-
-        // Add a request with manual timestamp (simulating old request)
-        let block_info = BlockInfo {
-            piece_index: 0,
-            offset: 0,
-            length: 16384,
-        };
-        let old_time = std::time::Instant::now() - Duration::from_secs(120); // 2 minutes ago
-        conn.pending_requests.insert(block_info.clone(), old_time);
-
-        // Check that it's detected as timed out
-        let timed_out = conn.get_timed_out_requests();
-        assert_eq!(timed_out.len(), 1);
-        assert_eq!(timed_out[0], block_info);
-
-        // Clear timed out requests
-        let cleared = conn.clear_timed_out_requests();
-        assert_eq!(cleared.len(), 1);
-        assert!(conn.pending_requests.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 use crate::bencode_parser::parser::{ValueOwned, parse_owned};
 use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
-use crate::peer::message::{ExtendedMessageId, Message, MessageId};
+use crate::peer::message::{ExtendedMessage, ExtendedMessageId, Message, MessageId};
 use crate::torrent::Infohash;
 use log::debug;
 use std::net::SocketAddr;
@@ -246,7 +246,7 @@ async fn fetch_metadata_from_peer(
 }
 
 /// Create an extension handshake message
-fn create_extension_handshake() -> Message {
+pub fn create_extension_handshake() -> Message {
     // Create bencode dictionary: d1:md11:ut_metadatai1eee
     // This means: {"m": {"ut_metadata": 1}}
     let payload = b"d1:md11:ut_metadatai1eee";
@@ -319,7 +319,7 @@ async fn receive_extension_handshake(
 }
 
 /// Create a metadata request message
-fn create_metadata_request(ut_metadata: u8, piece_index: u32) -> Message {
+pub fn create_metadata_request(ut_metadata: u8, piece_index: u32) -> Message {
     // Create bencode dictionary: d8:msg_typei0e5:piecei<piece>ee
     // msg_type 0 = request
     let bencode = format!("d8:msg_typei0e5:piecei{}ee", piece_index);
@@ -332,6 +332,18 @@ fn create_metadata_request(ut_metadata: u8, piece_index: u32) -> Message {
         kind: MessageId::Extended,
         payload,
     }
+}
+
+/// Parse a raw extended message payload and return the inner data if it is a metadata message.
+pub fn parse_metadata_response(payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.is_empty() {
+        return None;
+    }
+    let extended_message = ExtendedMessage::deserialize(payload)?;
+    if extended_message.kind != ExtendedMessageId::Metadata {
+        return None;
+    }
+    Some(extended_message.payload)
 }
 
 /// Find the byte length of the first complete bencode value in `data`.
