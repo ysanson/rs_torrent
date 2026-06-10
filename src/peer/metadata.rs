@@ -36,26 +36,10 @@ pub async fn fetch_metadata_from_peers(
     const CONCURRENT: usize = 5;
 
     let mut tasks: tokio::task::JoinSet<Result<Vec<u8>, String>> = tokio::task::JoinSet::new();
-    let mut peers_iter = peers.to_owned().into_iter();
-
-    let spawn_next = |tasks: &mut tokio::task::JoinSet<Result<Vec<u8>, String>>,
-                      peers_iter: &mut std::vec::IntoIter<Peer>| {
-        if let Some(peer) = peers_iter.next() {
-            let infohash = *infohash;
-            println!(
-                "🔗 Attempting to fetch metadata from {}:{}",
-                peer.ip_addr, peer.port
-            );
-            tasks.spawn(async move {
-                fetch_metadata_from_peer(&peer, &infohash, peer_id)
-                    .await
-                    .map_err(|e| e.to_string())
-            });
-        }
-    };
+    let mut peers_iter = peers.iter();
 
     for _ in 0..CONCURRENT {
-        spawn_next(&mut tasks, &mut peers_iter);
+        spawn_next_peer(&mut tasks, &mut peers_iter, infohash, peer_id);
     }
 
     loop {
@@ -66,13 +50,34 @@ pub async fn fetch_metadata_from_peers(
             }
             Some(Ok(Err(e))) => {
                 debug!("Peer failed: {e}");
-                spawn_next(&mut tasks, &mut peers_iter);
+                spawn_next_peer(&mut tasks, &mut peers_iter, infohash, peer_id);
             }
             Some(Err(_)) => {
-                spawn_next(&mut tasks, &mut peers_iter);
+                spawn_next_peer(&mut tasks, &mut peers_iter, infohash, peer_id);
             }
             None => return Err("Failed to fetch metadata from any peer".into()),
         }
+    }
+}
+
+fn spawn_next_peer(
+    tasks: &mut tokio::task::JoinSet<Result<Vec<u8>, String>>,
+    peers_iter: &mut std::slice::Iter<'_, Peer>,
+    infohash: &Infohash,
+    peer_id: [u8; 20],
+) {
+    if let Some(peer) = peers_iter.next() {
+        let peer = peer.clone();
+        let infohash = *infohash;
+        println!(
+            "🔗 Attempting to fetch metadata from {}:{}",
+            peer.ip_addr, peer.port
+        );
+        tasks.spawn(async move {
+            fetch_metadata_from_peer(&peer, &infohash, peer_id)
+                .await
+                .map_err(|e| e.to_string())
+        });
     }
 }
 
