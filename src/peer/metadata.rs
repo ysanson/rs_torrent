@@ -1,7 +1,7 @@
 use crate::bencode_parser::parser::{ValueOwned, parse_owned};
 use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
-use crate::peer::message::{ExtendedMessageId, Message, MessageId};
+use crate::peer::message::{ExtendedMessage, ExtendedMessageId, Message, MessageId};
 use crate::torrent::Infohash;
 use log::debug;
 use std::net::SocketAddr;
@@ -36,26 +36,10 @@ pub async fn fetch_metadata_from_peers(
     const CONCURRENT: usize = 5;
 
     let mut tasks: tokio::task::JoinSet<Result<Vec<u8>, String>> = tokio::task::JoinSet::new();
-    let mut peers_iter = peers.to_owned().into_iter();
-
-    let spawn_next = |tasks: &mut tokio::task::JoinSet<Result<Vec<u8>, String>>,
-                      peers_iter: &mut std::vec::IntoIter<Peer>| {
-        if let Some(peer) = peers_iter.next() {
-            let infohash = *infohash;
-            println!(
-                "🔗 Attempting to fetch metadata from {}:{}",
-                peer.ip_addr, peer.port
-            );
-            tasks.spawn(async move {
-                fetch_metadata_from_peer(&peer, &infohash, peer_id)
-                    .await
-                    .map_err(|e| e.to_string())
-            });
-        }
-    };
+    let mut peers_iter = peers.iter();
 
     for _ in 0..CONCURRENT {
-        spawn_next(&mut tasks, &mut peers_iter);
+        spawn_next_peer(&mut tasks, &mut peers_iter, infohash, peer_id);
     }
 
     loop {
@@ -66,13 +50,34 @@ pub async fn fetch_metadata_from_peers(
             }
             Some(Ok(Err(e))) => {
                 debug!("Peer failed: {e}");
-                spawn_next(&mut tasks, &mut peers_iter);
+                spawn_next_peer(&mut tasks, &mut peers_iter, infohash, peer_id);
             }
             Some(Err(_)) => {
-                spawn_next(&mut tasks, &mut peers_iter);
+                spawn_next_peer(&mut tasks, &mut peers_iter, infohash, peer_id);
             }
             None => return Err("Failed to fetch metadata from any peer".into()),
         }
+    }
+}
+
+fn spawn_next_peer(
+    tasks: &mut tokio::task::JoinSet<Result<Vec<u8>, String>>,
+    peers_iter: &mut std::slice::Iter<'_, Peer>,
+    infohash: &Infohash,
+    peer_id: [u8; 20],
+) {
+    if let Some(peer) = peers_iter.next() {
+        let peer = peer.clone();
+        let infohash = *infohash;
+        println!(
+            "🔗 Attempting to fetch metadata from {}:{}",
+            peer.ip_addr, peer.port
+        );
+        tasks.spawn(async move {
+            fetch_metadata_from_peer(&peer, &infohash, peer_id)
+                .await
+                .map_err(|e| e.to_string())
+        });
     }
 }
 
@@ -246,7 +251,7 @@ async fn fetch_metadata_from_peer(
 }
 
 /// Create an extension handshake message
-fn create_extension_handshake() -> Message {
+pub fn create_extension_handshake() -> Message {
     // Create bencode dictionary: d1:md11:ut_metadatai1eee
     // This means: {"m": {"ut_metadata": 1}}
     let payload = b"d1:md11:ut_metadatai1eee";
@@ -319,7 +324,7 @@ async fn receive_extension_handshake(
 }
 
 /// Create a metadata request message
-fn create_metadata_request(ut_metadata: u8, piece_index: u32) -> Message {
+pub fn create_metadata_request(ut_metadata: u8, piece_index: u32) -> Message {
     // Create bencode dictionary: d8:msg_typei0e5:piecei<piece>ee
     // msg_type 0 = request
     let bencode = format!("d8:msg_typei0e5:piecei{}ee", piece_index);
@@ -332,6 +337,18 @@ fn create_metadata_request(ut_metadata: u8, piece_index: u32) -> Message {
         kind: MessageId::Extended,
         payload,
     }
+}
+
+/// Parse a raw extended message payload and return the inner data if it is a metadata message.
+pub fn parse_metadata_response(payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.is_empty() {
+        return None;
+    }
+    let extended_message = ExtendedMessage::deserialize(payload)?;
+    if extended_message.kind != ExtendedMessageId::Metadata {
+        return None;
+    }
+    Some(extended_message.payload)
 }
 
 /// Find the byte length of the first complete bencode value in `data`.

@@ -118,6 +118,61 @@ impl TryFrom<Message> for Bitfield {
     }
 }
 
+/// Parsed payload of an incoming `Request` message.
+#[derive(Debug, Clone)]
+pub struct PieceRequest {
+    pub piece_index: u32,
+    pub begin: u32,
+    pub length: u32,
+}
+
+impl TryFrom<&Message> for PieceRequest {
+    type Error = &'static str;
+
+    fn try_from(msg: &Message) -> Result<Self, Self::Error> {
+        if msg.kind != MessageId::Request && msg.kind != MessageId::Cancel {
+            return Err("Not a request message");
+        }
+        if msg.payload.len() != 12 {
+            return Err("Invalid request message");
+        }
+        Ok(PieceRequest {
+            piece_index: u32::from_be_bytes([
+                msg.payload[0],
+                msg.payload[1],
+                msg.payload[2],
+                msg.payload[3],
+            ]),
+            begin: u32::from_be_bytes([
+                msg.payload[4],
+                msg.payload[5],
+                msg.payload[6],
+                msg.payload[7],
+            ]),
+            length: u32::from_be_bytes([
+                msg.payload[8],
+                msg.payload[9],
+                msg.payload[10],
+                msg.payload[11],
+            ]),
+        })
+    }
+}
+
+/// Build a `Piece` response message from a data slice.
+/// Payload layout: piece_index (u32 BE) | begin (u32 BE) | data
+pub fn build_piece_response(piece_index: u32, begin: u32, data: &[u8]) -> Message {
+    Message {
+        kind: MessageId::Piece,
+        payload: [
+            u32::to_be_bytes(piece_index).as_ref(),
+            u32::to_be_bytes(begin).as_ref(),
+            data,
+        ]
+        .concat(),
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtendedMessageId {
@@ -165,6 +220,110 @@ impl ExtendedMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use super::PieceRequest;
+    use super::build_piece_response;
+
+    // ── Step 2: PieceRequest parsing ──────────────────────────────────────────
+
+    #[test]
+    fn test_piece_request_parse_valid() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&5u32.to_be_bytes()); // piece_index = 5
+        payload.extend_from_slice(&16384u32.to_be_bytes()); // begin = 16384
+        payload.extend_from_slice(&16384u32.to_be_bytes()); // length = 16384
+        let msg = Message {
+            kind: MessageId::Request,
+            payload,
+        };
+        let req = PieceRequest::try_from(&msg).unwrap();
+        assert_eq!(req.piece_index, 5);
+        assert_eq!(req.begin, 16384);
+        assert_eq!(req.length, 16384);
+    }
+
+    #[test]
+    fn test_piece_request_parse_too_short() {
+        let msg = Message {
+            kind: MessageId::Request,
+            payload: vec![0u8; 8],
+        }; // needs 12
+        assert!(PieceRequest::try_from(&msg).is_err());
+    }
+
+    #[test]
+    fn test_piece_request_parse_wrong_message_type() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&16384u32.to_be_bytes());
+        let msg = Message {
+            kind: MessageId::Have,
+            payload,
+        };
+        assert!(PieceRequest::try_from(&msg).is_err());
+    }
+
+    #[test]
+    fn test_piece_request_zero_values() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        let msg = Message {
+            kind: MessageId::Request,
+            payload,
+        };
+        let req = PieceRequest::try_from(&msg).unwrap();
+        assert_eq!(req.piece_index, 0);
+        assert_eq!(req.begin, 0);
+        assert_eq!(req.length, 0);
+    }
+
+    // ── Step 2: build_piece_response ─────────────────────────────────────────
+
+    #[test]
+    fn test_build_piece_response_message_kind() {
+        let msg = build_piece_response(0, 0, &[0xABu8; 16]);
+        assert_eq!(msg.kind, MessageId::Piece);
+    }
+
+    #[test]
+    fn test_build_piece_response_payload_piece_index() {
+        let msg = build_piece_response(7, 0, &[]);
+        let idx = u32::from_be_bytes(msg.payload[0..4].try_into().unwrap());
+        assert_eq!(idx, 7);
+    }
+
+    #[test]
+    fn test_build_piece_response_payload_begin() {
+        let msg = build_piece_response(0, 16384, &[]);
+        let begin = u32::from_be_bytes(msg.payload[4..8].try_into().unwrap());
+        assert_eq!(begin, 16384);
+    }
+
+    #[test]
+    fn test_build_piece_response_payload_data() {
+        let data = vec![0xDEu8; 100];
+        let msg = build_piece_response(2, 0, &data);
+        assert_eq!(&msg.payload[8..], &data);
+    }
+
+    #[test]
+    fn test_build_piece_response_serialize_roundtrip() {
+        let data = vec![0xCAu8; 512];
+        let msg = build_piece_response(3, 32768, &data);
+        let serialized = msg.serialize();
+        let recovered = Message::deserialize(&serialized).unwrap();
+        assert_eq!(recovered.kind, MessageId::Piece);
+        let idx = u32::from_be_bytes(recovered.payload[0..4].try_into().unwrap());
+        let begin = u32::from_be_bytes(recovered.payload[4..8].try_into().unwrap());
+        assert_eq!(idx, 3);
+        assert_eq!(begin, 32768);
+        assert_eq!(&recovered.payload[8..], &data);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_message_id_try_from_valid() {
