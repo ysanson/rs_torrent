@@ -1,8 +1,8 @@
-use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
-use crate::peer::message::build_piece_response;
 use crate::peer::message::{Bitfield, Message, MessageId, PieceRequest};
+use crate::peer::message::{ExtendedMessageId, build_piece_response};
 use crate::peer::state::{BlockInfo, DownloadState};
+use crate::peer::{Peer, metadata};
 
 use super::connection::{MAX_PIPELINE_DEPTH, PeerConnection};
 use super::pool::IndexedConnections;
@@ -96,6 +96,9 @@ impl BitTorrentClient {
     pub async fn peer_worker(&self, peer: Peer) -> Result<(), Box<dyn std::error::Error>> {
         let mut stream = self.connect_to_peer(&peer).await?;
         let addr = SocketAddr::from((peer.ip_addr, peer.port));
+        stream
+            .write_all(&metadata::create_extension_handshake().serialize())
+            .await?;
         debug!("🔗 Connected to peer {addr}");
 
         // Initialize connection state
@@ -186,6 +189,10 @@ impl BitTorrentClient {
                 break;
             }
 
+            if let Err(e) = self.flush_metadata_queue(&addr, &mut write_half).await {
+                debug!("Error flushing metadata queue for peer {addr}: {e}");
+                break;
+            }
             // Print diagnostics every 60 seconds
             let should_diagnose = {
                 let connections = self.connections.lock().await;
@@ -367,7 +374,61 @@ impl BitTorrentClient {
         message: Message,
         addr: &SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        todo!()
+        match ExtendedMessageId::try_from(message.payload.first().copied().unwrap_or(255)) {
+            Ok(ExtendedMessageId::Handshake) => {
+                if let Some(ut_id) = metadata::parse_handshake_ut_id(&message.payload) {
+                    let mut connections = self.connections.lock().await;
+                    if let Some(conn) = connections.get_mut(addr) {
+                        conn.peer_ut_metadata_id = Some(ut_id);
+                        Ok(())
+                    } else {
+                        Err("No connection found for handshake".into())
+                    }
+                } else {
+                    Err("ut_metadata not found in handshake".into())
+                }
+            }
+            Ok(ExtendedMessageId::Metadata) => {
+                let Some(piece_index) = metadata::parse_metadata_request(
+                    &message.payload,
+                    metadata::OUR_UT_METADATA_ID,
+                ) else {
+                    return Ok(());
+                };
+                let (_peer_ut_id, response) = {
+                    let connections = self.connections.lock().await;
+                    let conn = connections.get(addr).ok_or("Unknown peer")?;
+                    let peer_ut_id = conn.peer_ut_metadata_id.unwrap_or(1);
+                    let response = if let Some(ref info_dict) = self.info_dict {
+                        let start = piece_index as usize * 16384;
+                        if start >= info_dict.len() {
+                            metadata::create_metadata_reject(peer_ut_id, piece_index)
+                        } else {
+                            let end = (start + metadata::METADATA_PIECE_SIZE).min(info_dict.len());
+                            metadata::create_metadata_data_response(
+                                peer_ut_id,
+                                piece_index,
+                                &info_dict[start..end],
+                                info_dict.len(),
+                            )
+                        }
+                    } else {
+                        metadata::create_metadata_reject(peer_ut_id, piece_index)
+                    };
+                    (peer_ut_id, response)
+                };
+                let mut connections = self.connections.lock().await;
+                if let Some(conn) = connections.get_mut(addr) {
+                    conn.pending_metadata_responses.push_back(response);
+                    Ok(())
+                } else {
+                    Err("Unknown peer".into())
+                }
+            }
+            _ => {
+                Err("Unknown extended message".into())
+            }
+        }
     }
 
     /// Handle a piece message from a peer
@@ -917,6 +978,31 @@ impl BitTorrentClient {
                 write_half.write_all(&msg.serialize()).await?;
                 download_state.record_upload(req.length as u64);
             }
+        }
+
+        Ok(())
+    }
+
+    async fn flush_metadata_queue(
+        &self,
+        addr: &SocketAddr,
+        write_half: &mut OwnedWriteHalf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut to_serve = Vec::new();
+        {
+            let mut connections = self.connections.lock().await;
+            if let Some(conn) = connections.get_mut(addr) {
+                while let Some(req) = conn.pending_metadata_responses.pop_front() {
+                    to_serve.push(req);
+                }
+            }
+        }
+        if to_serve.is_empty() {
+            return Ok(());
+        }
+
+        for req in to_serve {
+            write_half.write_all(&req.serialize()).await?;
         }
 
         Ok(())

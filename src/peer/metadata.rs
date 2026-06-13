@@ -12,11 +12,11 @@ use tokio::time::timeout;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-const METADATA_PIECE_SIZE: usize = 16384; // 16 KiB per piece
+pub const METADATA_PIECE_SIZE: usize = 16384; // 16 KiB per piece
 const MAX_RETRIES: usize = 3;
 // The local ID we advertise for ut_metadata in our extension handshake.
 // Peers use this ID as payload[0] when sending metadata pieces back to us.
-const OUR_UT_METADATA_ID: u8 = 1;
+pub const OUR_UT_METADATA_ID: u8 = 1;
 
 /// Represents the metadata extension handshake information
 #[derive(Debug, Clone)]
@@ -538,7 +538,20 @@ pub fn create_metadata_data_response(
     piece_data: &[u8],
     total_size: usize,
 ) -> Message {
-    todo!()
+    let bencode = format!(
+        "d8:msg_typei1e5:piecei{}e10:total_sizei{}ee",
+        piece_index, total_size
+    );
+    let payload = [
+        [peer_ut_metadata_id].as_ref(),
+        bencode.as_bytes(),
+        piece_data,
+    ]
+    .concat();
+    Message {
+        kind: MessageId::Extended,
+        payload,
+    }
 }
 
 /// Build a metadata *reject* message (BEP-9 `msg_type=2`).
@@ -552,7 +565,29 @@ pub fn create_metadata_data_response(
 /// Send this when you cannot serve the requested piece (info dict not yet
 /// available, or piece index is out of range).
 pub fn create_metadata_reject(peer_ut_metadata_id: u8, piece_index: u32) -> Message {
-    todo!()
+    let bencode = format!("d8:msg_typei2e5:piecei{}ee", piece_index);
+    let payload = [[peer_ut_metadata_id].as_ref(), bencode.as_bytes()].concat();
+    Message {
+        kind: MessageId::Extended,
+        payload,
+    }
+}
+
+pub fn parse_handshake_ut_id(payload: &[u8]) -> Option<u8> {
+    let parsed = parse_owned(&payload[1..]).ok()?;
+    let ValueOwned::Dictionary { entries, .. } = parsed.into_iter().next()? else {
+        return None;
+    };
+    let ValueOwned::Dictionary {
+        entries: m_dict, ..
+    } = entries.get(b"m" as &[u8])?
+    else {
+        return None;
+    };
+    let ValueOwned::Integer(n) = m_dict.get(b"ut_metadata" as &[u8])? else {
+        return None;
+    };
+    Some(*n as u8)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
