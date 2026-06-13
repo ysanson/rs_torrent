@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use rs_torrent::{download_from_magnet, download_from_torrent_file};
 
-/// Simple program to greet a person
+/// Torrent client downloader CLI. Supports downloading from torrent files and magnet URIs.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -30,7 +30,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::builder().format_timestamp(None).init();
     if let Commands::File { file, output_file } = &args.command {
         download_from_torrent_file(file, output_file).await?;
-    } else if let Commands::Magnet { magnet, output_file } = &args.command {
+    } else if let Commands::Magnet {
+        magnet,
+        output_file,
+    } = &args.command
+    {
         download_from_magnet(magnet, output_file).await?;
     }
     Ok(())
