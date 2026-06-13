@@ -483,6 +483,226 @@ async fn receive_message_with_retry(
     }
 }
 
+// ── Responding to incoming metadata requests (BEP-9 server side) ─────────────
+
+/// Parse an incoming metadata request from a peer's extended message payload.
+///
+/// Payload layout (as received in an `Extended` message):
+/// ```text
+/// byte  0:    ut_metadata ID we advertised — must equal `expected_ut_metadata`
+/// bytes 1…:  bencode dict  {"msg_type": 0, "piece": N}
+/// ```
+///
+/// Returns the requested piece index `N` if the message is a valid `msg_type=0`
+/// request and the leading ID byte matches.  Returns `None` for anything else
+/// (wrong ID, wrong msg_type, malformed bencode).
+pub fn parse_metadata_request(payload: &[u8], expected_ut_metadata: u8) -> Option<u32> {
+    if payload.is_empty() {
+        return None;
+    }
+    let ut_metadata_id = payload[0];
+    if ut_metadata_id != expected_ut_metadata {
+        return None;
+    }
+    let bencode_data = &payload[1..];
+    let bencode_end = find_bencode_end(bencode_data)?;
+    let parsed = parse_owned(&bencode_data[..bencode_end]).ok()?;
+    let ValueOwned::Dictionary { entries, .. } = parsed.first()? else {
+        return None;
+    };
+
+    match entries.get(b"msg_type" as &[u8]) {
+        Some(ValueOwned::Integer(0)) => {}
+        _ => return None,
+    }
+    match entries.get(b"piece" as &[u8]) {
+        Some(ValueOwned::Integer(n)) => Some(*n as u32),
+        _ => None,
+    }
+}
+
+/// Build a metadata *data* response (BEP-9 `msg_type=1`) for one piece.
+///
+/// Payload layout (to be wrapped in an `Extended` message):
+/// ```text
+/// byte  0:    peer_ut_metadata_id  — the ID the peer told us to use in their handshake
+/// bytes 1…:  bencode dict  {"msg_type": 1, "piece": N, "total_size": T}
+/// trailing:  raw bytes for this piece of the info dict
+/// ```
+///
+/// `piece_data` is a slice of the full info dict covering exactly this piece
+/// (at most 16 KiB).  `total_size` is the byte length of the complete info dict.
+pub fn create_metadata_data_response(
+    peer_ut_metadata_id: u8,
+    piece_index: u32,
+    piece_data: &[u8],
+    total_size: usize,
+) -> Message {
+    todo!()
+}
+
+/// Build a metadata *reject* message (BEP-9 `msg_type=2`).
+///
+/// Payload layout:
+/// ```text
+/// byte  0:    peer_ut_metadata_id  — the ID the peer told us to use
+/// bytes 1…:  bencode dict  {"msg_type": 2, "piece": N}
+/// ```
+///
+/// Send this when you cannot serve the requested piece (info dict not yet
+/// available, or piece index is out of range).
+pub fn create_metadata_reject(peer_ut_metadata_id: u8, piece_index: u32) -> Message {
+    todo!()
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bencode_parser::parser::{ValueOwned, parse_owned};
+    use crate::peer::message::MessageId;
+
+    /// Build the raw payload a peer would send when requesting metadata piece `piece`.
+    fn make_request_payload(ut_id: u8, piece: u32) -> Vec<u8> {
+        let bencode = format!("d8:msg_typei0e5:piecei{}ee", piece);
+        let mut buf = vec![ut_id];
+        buf.extend_from_slice(bencode.as_bytes());
+        buf
+    }
+
+    // ── parse_metadata_request ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_metadata_request_returns_piece_index() {
+        let payload = make_request_payload(1, 0);
+        assert_eq!(parse_metadata_request(&payload, 1), Some(0));
+    }
+
+    #[test]
+    fn parse_metadata_request_non_zero_piece() {
+        let payload = make_request_payload(1, 5);
+        assert_eq!(parse_metadata_request(&payload, 1), Some(5));
+    }
+
+    #[test]
+    fn parse_metadata_request_wrong_ut_id_returns_none() {
+        let payload = make_request_payload(2, 0);
+        assert_eq!(parse_metadata_request(&payload, 1), None);
+    }
+
+    #[test]
+    fn parse_metadata_request_empty_returns_none() {
+        assert_eq!(parse_metadata_request(&[], 1), None);
+    }
+
+    #[test]
+    fn parse_metadata_request_data_msg_type_returns_none() {
+        // msg_type=1 is a data response — must not be parsed as a request
+        let bencode = b"d8:msg_typei1e5:piecei0ee";
+        let mut payload = vec![1u8];
+        payload.extend_from_slice(bencode);
+        assert_eq!(parse_metadata_request(&payload, 1), None);
+    }
+
+    #[test]
+    fn parse_metadata_request_reject_msg_type_returns_none() {
+        let bencode = b"d8:msg_typei2e5:piecei0ee";
+        let mut payload = vec![1u8];
+        payload.extend_from_slice(bencode);
+        assert_eq!(parse_metadata_request(&payload, 1), None);
+    }
+
+    // ── create_metadata_reject ────────────────────────────────────────────────
+
+    #[test]
+    fn create_metadata_reject_is_extended_message() {
+        let msg = create_metadata_reject(1, 0);
+        assert_eq!(msg.kind, MessageId::Extended);
+    }
+
+    #[test]
+    fn create_metadata_reject_uses_peer_ut_id() {
+        let msg = create_metadata_reject(3, 0);
+        assert_eq!(
+            msg.payload[0], 3,
+            "first byte must be the peer's ut_metadata ID"
+        );
+    }
+
+    #[test]
+    fn create_metadata_reject_encodes_msg_type_and_piece() {
+        let msg = create_metadata_reject(1, 7);
+        let bencode = &msg.payload[1..];
+        let parsed = parse_owned(bencode).expect("reject payload must be valid bencode");
+        let dict = match parsed.first() {
+            Some(ValueOwned::Dictionary { entries, .. }) => entries,
+            _ => panic!("expected a bencode dictionary"),
+        };
+        match dict.get(b"msg_type" as &[u8]) {
+            Some(ValueOwned::Integer(v)) => assert_eq!(*v, 2, "msg_type must be 2 (reject)"),
+            _ => panic!("missing or wrong msg_type"),
+        }
+        match dict.get(b"piece" as &[u8]) {
+            Some(ValueOwned::Integer(v)) => assert_eq!(*v, 7),
+            _ => panic!("missing or wrong piece"),
+        }
+    }
+
+    // ── create_metadata_data_response ─────────────────────────────────────────
+
+    #[test]
+    fn create_metadata_data_response_is_extended_message() {
+        let msg = create_metadata_data_response(1, 0, b"data", 4);
+        assert_eq!(msg.kind, MessageId::Extended);
+    }
+
+    #[test]
+    fn create_metadata_data_response_uses_peer_ut_id() {
+        let msg = create_metadata_data_response(4, 0, b"data", 4);
+        assert_eq!(
+            msg.payload[0], 4,
+            "first byte must be the peer's ut_metadata ID"
+        );
+    }
+
+    #[test]
+    fn create_metadata_data_response_appends_piece_bytes_at_end() {
+        let piece = b"info_dict_chunk_here";
+        let msg = create_metadata_data_response(1, 0, piece, piece.len());
+        assert!(
+            msg.payload.ends_with(piece),
+            "raw piece bytes must follow the bencode dict"
+        );
+    }
+
+    #[test]
+    fn create_metadata_data_response_encodes_correct_fields() {
+        let piece = b"x";
+        let msg = create_metadata_data_response(1, 3, piece, 200);
+        let body = &msg.payload[1..]; // skip the ut_metadata ID byte
+        let bencode_end =
+            find_bencode_end(body).expect("bencode end not found in data response payload");
+        let parsed = parse_owned(&body[..bencode_end]).expect("invalid bencode in data response");
+        let dict = match parsed.first() {
+            Some(ValueOwned::Dictionary { entries, .. }) => entries,
+            _ => panic!("expected a bencode dictionary"),
+        };
+        match dict.get(b"msg_type" as &[u8]) {
+            Some(ValueOwned::Integer(v)) => assert_eq!(*v, 1, "msg_type must be 1 (data)"),
+            _ => panic!("missing or wrong msg_type"),
+        }
+        match dict.get(b"piece" as &[u8]) {
+            Some(ValueOwned::Integer(v)) => assert_eq!(*v, 3),
+            _ => panic!("missing or wrong piece"),
+        }
+        match dict.get(b"total_size" as &[u8]) {
+            Some(ValueOwned::Integer(v)) => assert_eq!(*v, 200),
+            _ => panic!("missing or wrong total_size"),
+        }
+    }
+}
+
 /// Receive a complete message from the stream
 async fn receive_message(stream: &mut TcpStream) -> Result<Message, Box<dyn std::error::Error>> {
     // Read message length

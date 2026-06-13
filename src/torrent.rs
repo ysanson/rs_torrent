@@ -19,6 +19,7 @@ pub struct Torrent {
     pub name: String,
     pub pieces: Vec<PieceHash>,
     pub infohash: Infohash,
+    pub raw_info_dict: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,15 +71,16 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
     let top_level = parsed.first().ok_or("Empty torrent file")?;
 
     let dict = match top_level {
-        ValueOwned::Dictionary { entries, hash: _ } => entries,
+        ValueOwned::Dictionary { entries, .. } => entries,
         _ => return Err("Invalid torrent file: expected top-level dictionary".into()),
     };
 
     let announce = get_string(dict, b"announce")?;
-    let (info, infohash) = match dict.get(b"info" as &[u8]).ok_or("Missing 'info' field")? {
-        ValueOwned::Dictionary { entries, hash } => (entries, hash),
-        _ => return Err("Invalid 'info' field".into()),
-    };
+    let (info, infohash, raw_info_dict) =
+        match dict.get(b"info" as &[u8]).ok_or("Missing 'info' field")? {
+            ValueOwned::Dictionary { entries, hash, raw } => (entries, hash, raw.clone()),
+            _ => return Err("Invalid 'info' field".into()),
+        };
 
     let name = get_string(info, b"name")?;
     let piece_length = get_u32(info, b"piece length")?;
@@ -102,7 +104,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
         length
     } else if let Some(ValueOwned::List(files)) = info.get(b"files" as &[u8]) {
         files.iter().fold(0u64, |acc, file| {
-            if let ValueOwned::Dictionary { entries, hash: _ } = file {
+            if let ValueOwned::Dictionary { entries, .. } = file {
                 if let Ok(length) = get_u64(entries, b"length") {
                     acc + length
                 } else {
@@ -125,6 +127,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<Torrent, Box<dyn std::error::E
         name,
         pieces,
         infohash: *infohash,
+        raw_info_dict,
     })
 }
 
@@ -161,7 +164,7 @@ pub fn parse_info_dict_bytes(
         length
     } else if let Some(ValueOwned::List(files)) = info.get(b"files" as &[u8]) {
         files.iter().fold(0u64, |acc, file| {
-            if let ValueOwned::Dictionary { entries, hash: _ } = file {
+            if let ValueOwned::Dictionary { entries, .. } = file {
                 if let Ok(length) = get_u64(entries, b"length") {
                     acc + length
                 } else {
@@ -184,6 +187,7 @@ pub fn parse_info_dict_bytes(
         name,
         pieces,
         infohash,
+        raw_info_dict: data.to_vec(),
     })
 }
 

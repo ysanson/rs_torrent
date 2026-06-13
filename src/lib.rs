@@ -4,6 +4,7 @@ pub mod torrent;
 pub mod tracker;
 
 use crate::peer::Peer;
+use std::sync::Arc;
 use std::time::Duration;
 
 // Re-export commonly used types and functions for easier access
@@ -38,7 +39,7 @@ pub async fn download_from_torrent_file(
         torrent.pieces.clone(),
         torrent.total_size,
     );
-    let client = BitTorrentClient::new(download_state, PEER_ID);
+    let client = BitTorrentClient::new(download_state, PEER_ID, Some(Arc::new(torrent.raw_info_dict.clone())));
     let (reannounce_interval, initial_peers) = announce_to_tracker(
         &torrent.announce,
         &torrent.infohash,
@@ -249,7 +250,7 @@ pub async fn download_from_magnet(
         complete_torrent.pieces.clone(),
         complete_torrent.total_size,
     );
-    let client = BitTorrentClient::new(download_state, PEER_ID);
+    let client = BitTorrentClient::new(download_state, PEER_ID, Some(Arc::new(metadata)));
 
     // Connect to initial peers
     client.connect_to_new_peers(peers_vec).await;
@@ -362,10 +363,7 @@ mod tests {
         let data = b"d3:cow3:moo4:spam4:eggse";
         let parsed = parse(data).unwrap();
 
-        if let Some(Value::Dictionary {
-            entries: dict,
-            hash: _,
-        }) = parsed.first()
+        if let Some(Value::Dictionary { entries: dict, .. }) = parsed.first()
         {
             if let Some(Value::Bytes(cow_value)) = dict.get(b"cow" as &[u8]) {
                 assert_eq!(cow_value, b"moo");
@@ -382,10 +380,7 @@ mod tests {
         let data = b"d3:cow3:moo4:spam4:eggse";
         let parsed = parse_owned(data).unwrap();
 
-        if let Some(ValueOwned::Dictionary {
-            entries: dict,
-            hash: _,
-        }) = parsed.first()
+        if let Some(ValueOwned::Dictionary { entries: dict, .. }) = parsed.first()
         {
             if let Some(ValueOwned::Bytes(cow_value)) = dict.get(b"cow" as &[u8]) {
                 assert_eq!(cow_value, b"moo");

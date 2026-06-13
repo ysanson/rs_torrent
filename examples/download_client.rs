@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 3: Create client with a unique peer ID
     let peer_id = generate_peer_id();
-    let client = BitTorrentClient::new(download_state, peer_id);
+    let client = BitTorrentClient::new(download_state, peer_id, None);
 
     // Step 4: Get peers from tracker (simulated here)
     let peers = get_test_peers();
@@ -139,6 +139,7 @@ fn create_test_torrent() -> rs_torrent::Torrent {
             0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC,
             0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78,
         ],
+        raw_info_dict: vec![],
     }
 }
 
@@ -177,7 +178,7 @@ async fn download_from_torrent_file(file_path: &str) -> Result<(), Box<dyn std::
 
     // Step 3: Create client
     let peer_id = generate_peer_id();
-    let client = BitTorrentClient::new(download_state, peer_id);
+    let client = BitTorrentClient::new(download_state, peer_id, None);
 
     // Step 4: Get peers from tracker
     let peers = rs_torrent::tracker::announce_to_tracker(

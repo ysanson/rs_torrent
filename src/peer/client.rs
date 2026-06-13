@@ -4,7 +4,7 @@ use crate::peer::message::build_piece_response;
 use crate::peer::message::{Bitfield, Message, MessageId, PieceRequest};
 use crate::peer::state::{BlockInfo, DownloadState};
 
-use super::connection::{PeerConnection, MAX_PIPELINE_DEPTH};
+use super::connection::{MAX_PIPELINE_DEPTH, PeerConnection};
 use super::pool::IndexedConnections;
 use super::stats::{BATCH_SIZE, PerformanceCache, PipelineStats};
 
@@ -29,15 +29,21 @@ pub struct BitTorrentClient {
     pub connections: Arc<Mutex<IndexedConnections>>,
     pub pipeline_stats: Arc<Mutex<PipelineStats>>,
     pub peer_id: [u8; 20],
+    pub info_dict: Option<Arc<Vec<u8>>>,
 }
 
 impl BitTorrentClient {
-    pub fn new(download_state: DownloadState, peer_id: [u8; 20]) -> Self {
+    pub fn new(
+        download_state: DownloadState,
+        peer_id: [u8; 20],
+        info_dict: Option<Arc<Vec<u8>>>,
+    ) -> Self {
         Self {
             download_state: Arc::new(Mutex::new(download_state)),
             connections: Arc::new(Mutex::new(IndexedConnections::new())),
             pipeline_stats: Arc::new(Mutex::new(PipelineStats::default())),
             peer_id,
+            info_dict,
         }
     }
 
@@ -311,7 +317,7 @@ impl BitTorrentClient {
                 }
             }
             MessageId::Extended => {
-                // Not yet implemented.
+                self.handle_extended_message(message, addr).await?;
             }
         }
         Ok(())
@@ -328,11 +334,40 @@ impl BitTorrentClient {
             }
             let mut connections = self.connections.lock().await;
             if let Some(conn) = connections.get_mut(addr)
-                && !conn.am_choking && conn.can_queue_upload() {
-                    conn.pending_uploads.push_back(piece_request);
-                }
+                && !conn.am_choking
+                && conn.can_queue_upload()
+            {
+                conn.pending_uploads.push_back(piece_request);
+            }
         }
         Ok(())
+    }
+
+    /// Dispatch an incoming `Extended` message (BEP-10).
+    ///
+    /// Two sub-cases, distinguished by `message.payload[0]`:
+    ///
+    /// **Handshake (`0`)** — the peer's extension capability announcement.
+    /// Parse the bencode dict (`payload[1..]`) to find `"m" → "ut_metadata"`.
+    /// Store that value in `conn.peer_ut_metadata_id` so you can address
+    /// data/reject responses correctly.
+    ///
+    /// **Metadata request (`OUR_UT_METADATA_ID`)** — the peer is asking for a
+    /// piece of our info dict (BEP-9 `msg_type=0`).
+    /// Call `parse_metadata_request` to get the piece index, then either:
+    ///   - slice the info dict and queue `create_metadata_data_response`, or
+    ///   - queue `create_metadata_reject` if the dict is unavailable.
+    ///
+    /// Hint: `BitTorrentClient` will need an `info_dict: Option<Arc<Vec<u8>>>`
+    /// field, and `PeerConnection` a `pending_metadata_responses` queue mirroring
+    /// `pending_uploads`, drained by a new `flush_metadata_queue` step in the
+    /// main loop.
+    async fn handle_extended_message(
+        &self,
+        message: Message,
+        addr: &SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        todo!()
     }
 
     /// Handle a piece message from a peer
@@ -931,6 +966,7 @@ impl Clone for BitTorrentClient {
             connections: Arc::clone(&self.connections),
             pipeline_stats: Arc::clone(&self.pipeline_stats),
             peer_id: self.peer_id,
+            info_dict: self.info_dict.clone(),
         }
     }
 }
