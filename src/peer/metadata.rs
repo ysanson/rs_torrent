@@ -270,56 +270,37 @@ pub fn create_extension_handshake() -> Message {
 async fn receive_extension_handshake(
     stream: &mut TcpStream,
 ) -> Result<MetadataExtension, Box<dyn std::error::Error>> {
-    // Keep trying to receive until we get an extension handshake
     loop {
-        let message = loop {
-            match receive_message(stream).await {
-                Ok(msg) => break msg,
-                Err(e) if e.to_string().contains("keep-alive") => continue,
-                Err(e) => return Err(e),
-            }
+        let message = receive_message_with_retry(stream).await?;
+
+        if message.kind != MessageId::Extended {
+            debug!("Received {:?} while waiting for extension handshake, continuing...", message.kind);
+            continue;
+        }
+        if message.payload.first().copied() != Some(ExtendedMessageId::Handshake as u8) {
+            continue;
+        }
+
+        let bencode_data = &message.payload[1..];
+        let parsed = parse_owned(bencode_data)?;
+
+        let Some(ValueOwned::Dictionary { entries, .. }) = parsed.first() else {
+            return Err("Invalid extension handshake format".into());
+        };
+        let Some(ValueOwned::Dictionary { entries: m_dict, .. }) = entries.get(b"m" as &[u8]) else {
+            return Err("Invalid extension handshake format".into());
+        };
+        let Some(ValueOwned::Integer(ut_metadata)) = m_dict.get(b"ut_metadata" as &[u8]) else {
+            return Err("Invalid extension handshake format".into());
+        };
+        let Some(ValueOwned::Integer(metadata_size)) = entries.get(b"metadata_size" as &[u8]) else {
+            return Err("Invalid extension handshake format".into());
         };
 
-        if message.kind == MessageId::Extended {
-            if !message.payload.is_empty()
-                && message.payload[0] == ExtendedMessageId::Handshake as u8
-            {
-                // Parse bencode dictionary
-                let bencode_data = &message.payload[1..];
-                let parsed = parse_owned(bencode_data)?;
-
-                if let Some(ValueOwned::Dictionary { entries, .. }) = parsed.first() {
-                    // Get the "m" dictionary
-                    if let Some(ValueOwned::Dictionary {
-                        entries: m_dict, ..
-                    }) = entries.get(b"m" as &[u8])
-                    {
-                        // Get ut_metadata value
-                        if let Some(ValueOwned::Integer(ut_metadata)) =
-                            m_dict.get(b"ut_metadata" as &[u8])
-                        {
-                            // Get metadata_size
-                            if let Some(ValueOwned::Integer(metadata_size)) =
-                                entries.get(b"metadata_size" as &[u8])
-                            {
-                                return Ok(MetadataExtension {
-                                    ut_metadata: *ut_metadata as u8,
-                                    metadata_size: *metadata_size as usize,
-                                });
-                            }
-                        }
-                    }
-                }
-
-                return Err("Invalid extension handshake format".into());
-            }
-        } else {
-            // Not an extension handshake, might be bitfield or other message
-            debug!(
-                "Received {:?} while waiting for extension handshake, continuing...",
-                message.kind
-            );
-        }
+        return Ok(MetadataExtension {
+            ut_metadata: *ut_metadata as u8,
+            metadata_size: *metadata_size as usize,
+        });
     }
 }
 
@@ -412,54 +393,31 @@ fn parse_metadata_piece(
     payload: &[u8],
     expected_ut_metadata: u8,
 ) -> Result<Option<MetadataPiece>, Box<dyn std::error::Error>> {
-    if payload.is_empty() {
-        return Ok(None);
-    }
-
-    let ut_metadata = payload[0];
-    if ut_metadata != expected_ut_metadata {
+    if payload.is_empty() || payload[0] != expected_ut_metadata {
         return Ok(None);
     }
 
     let bencode_data = &payload[1..];
     let bencode_end = find_bencode_end(bencode_data).ok_or("Invalid metadata piece format")?;
+    let parsed = parse_owned(&bencode_data[..bencode_end])?;
 
-    // Parse the bencode header
-    let header = &bencode_data[..bencode_end];
-    let parsed = parse_owned(header)?;
+    let Some(ValueOwned::Dictionary { entries, .. }) = parsed.first() else {
+        return Ok(None);
+    };
 
-    if let Some(ValueOwned::Dictionary { entries, .. }) = parsed.first() {
-        // Check msg_type (should be 1 for data)
-        if let Some(ValueOwned::Integer(msg_type)) = entries.get(b"msg_type" as &[u8]) {
-            if *msg_type == 2 {
-                // msg_type 2 = reject
-                debug!("Peer rejected metadata request");
-                return Err("Metadata request rejected by peer".into());
-            }
-            if *msg_type != 1 {
-                // Not a data response
-                return Ok(None);
-            }
-        }
-
-        // Get piece index
-        if let Some(ValueOwned::Integer(piece)) = entries.get(b"piece" as &[u8]) {
-            let piece_index = *piece as usize;
-
-            // The actual data follows the bencode dictionary
-            let data = bencode_data[bencode_end..].to_vec();
-
-            debug!(
-                "Parsed metadata piece {}, data length: {}",
-                piece_index,
-                data.len()
-            );
-
-            return Ok(Some((piece_index, data)));
-        }
+    match entries.get(b"msg_type" as &[u8]) {
+        Some(ValueOwned::Integer(2)) => return Err("Metadata request rejected by peer".into()),
+        Some(ValueOwned::Integer(1)) => {}
+        _ => return Ok(None),
     }
 
-    Ok(None)
+    let Some(ValueOwned::Integer(piece)) = entries.get(b"piece" as &[u8]) else {
+        return Ok(None);
+    };
+
+    let data = bencode_data[bencode_end..].to_vec();
+    debug!("Parsed metadata piece {}, data length: {}", piece, data.len());
+    Ok(Some((*piece as usize, data)))
 }
 
 /// Receive a complete message from the stream with retry on keep-alive
