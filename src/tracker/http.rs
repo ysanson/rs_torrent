@@ -107,7 +107,7 @@ pub async fn announce_to_tracker(
     let response_bytes = contact_tracker(&url).await?;
     let values = parse_owned(&response_bytes)?;
     let dict = match values.first() {
-        Some(ValueOwned::Dictionary { entries, hash: _ }) => entries,
+        Some(ValueOwned::Dictionary { entries, .. }) => entries,
         _ => return Err("Tracker response not a dict".into()),
     };
 
@@ -147,6 +147,7 @@ mod tests {
             infohash: [
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
             ],
+            raw_info_dict: vec![],
         }
     }
 

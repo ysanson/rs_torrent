@@ -33,6 +33,7 @@ impl TryFrom<u8> for MessageId {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Message {
     pub kind: MessageId,
     pub payload: Vec<u8>,

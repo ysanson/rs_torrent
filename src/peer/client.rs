@@ -1,10 +1,10 @@
-use crate::peer::Peer;
 use crate::peer::handshake::Handshake;
-use crate::peer::message::build_piece_response;
-use crate::peer::message::{Bitfield, Message, MessageId, PieceRequest};
+use crate::peer::message::{Bitfield, Message, MessageId, PieceRequest, build_piece_response};
+use crate::peer::metadata::OUR_UT_METADATA_ID;
 use crate::peer::state::{BlockInfo, DownloadState};
+use crate::peer::{Peer, metadata};
 
-use super::connection::{PeerConnection, MAX_PIPELINE_DEPTH};
+use super::connection::{MAX_PIPELINE_DEPTH, PeerConnection};
 use super::pool::IndexedConnections;
 use super::stats::{BATCH_SIZE, PerformanceCache, PipelineStats};
 
@@ -29,15 +29,21 @@ pub struct BitTorrentClient {
     pub connections: Arc<Mutex<IndexedConnections>>,
     pub pipeline_stats: Arc<Mutex<PipelineStats>>,
     pub peer_id: [u8; 20],
+    pub info_dict: Option<Arc<Vec<u8>>>,
 }
 
 impl BitTorrentClient {
-    pub fn new(download_state: DownloadState, peer_id: [u8; 20]) -> Self {
+    pub fn new(
+        download_state: DownloadState,
+        peer_id: [u8; 20],
+        info_dict: Option<Arc<Vec<u8>>>,
+    ) -> Self {
         Self {
             download_state: Arc::new(Mutex::new(download_state)),
             connections: Arc::new(Mutex::new(IndexedConnections::new())),
             pipeline_stats: Arc::new(Mutex::new(PipelineStats::default())),
             peer_id,
+            info_dict,
         }
     }
 
@@ -45,7 +51,7 @@ impl BitTorrentClient {
     pub async fn connect_to_peer(
         &self,
         peer: &Peer,
-    ) -> Result<TcpStream, Box<dyn std::error::Error>> {
+    ) -> Result<(TcpStream, bool), Box<dyn std::error::Error>> {
         let addr = SocketAddr::from((peer.ip_addr, peer.port));
         let stream = timeout(CONNECTION_TIMEOUT, TcpStream::connect(addr)).await??;
 
@@ -60,14 +66,19 @@ impl BitTorrentClient {
         self.perform_handshake(stream, handshake).await
     }
 
-    /// Perform the BitTorrent handshake with a peer
+    /// Perform the BitTorrent handshake with a peer.
+    ///
+    /// Returns the connected stream along with whether the peer advertised
+    /// support for the extension protocol (BEP-10), which callers need to
+    /// know before sending an `Extended` (e.g. `ut_metadata`) handshake.
     async fn perform_handshake(
         &self,
         mut stream: TcpStream,
         handshake: Handshake,
-    ) -> Result<TcpStream, Box<dyn std::error::Error>> {
-        // Send our handshake
-        let handshake_bytes = handshake.serialize();
+    ) -> Result<(TcpStream, bool), Box<dyn std::error::Error>> {
+        // Send our handshake, advertising extension protocol support.
+        let mut handshake_bytes = handshake.serialize();
+        handshake_bytes[25] |= 0x10;
         stream.write_all(&handshake_bytes).await?;
 
         // Receive peer's handshake
@@ -82,13 +93,15 @@ impl BitTorrentClient {
             return Err("Infohash mismatch".into());
         }
 
+        let peer_supports_extensions = response[25] & 0x10 != 0;
+
         debug!("✅ Handshake successful with peer - infohash matches");
-        Ok(stream)
+        Ok((stream, peer_supports_extensions))
     }
 
     /// Main peer worker that handles communication with a single peer
     pub async fn peer_worker(&self, peer: Peer) -> Result<(), Box<dyn std::error::Error>> {
-        let mut stream = self.connect_to_peer(&peer).await?;
+        let (mut stream, peer_supports_extensions) = self.connect_to_peer(&peer).await?;
         let addr = SocketAddr::from((peer.ip_addr, peer.port));
         debug!("🔗 Connected to peer {addr}");
 
@@ -112,6 +125,13 @@ impl BitTorrentClient {
         };
         stream.write_all(&unchoke_msg.serialize()).await?;
         debug!("📤 Sent 'unchoke' to peer {addr}");
+
+        if peer_supports_extensions {
+            let metadata_size = self.info_dict.as_ref().map(|d| d.len());
+            let ext_handshake = metadata::create_extension_handshake(metadata_size);
+            stream.write_all(&ext_handshake.serialize()).await?;
+            debug!("📤 Sent extension handshake to peer {addr}");
+        }
 
         {
             let mut connections = self.connections.lock().await;
@@ -180,6 +200,10 @@ impl BitTorrentClient {
                 break;
             }
 
+            if let Err(e) = self.flush_metadata_queue(&addr, &mut write_half).await {
+                debug!("Error flushing metadata queue for peer {addr}: {e}");
+                break;
+            }
             // Print diagnostics every 60 seconds
             let should_diagnose = {
                 let connections = self.connections.lock().await;
@@ -311,7 +335,7 @@ impl BitTorrentClient {
                 }
             }
             MessageId::Extended => {
-                // Not yet implemented.
+                self.handle_extended_message(message, addr).await?;
             }
         }
         Ok(())
@@ -328,9 +352,80 @@ impl BitTorrentClient {
             }
             let mut connections = self.connections.lock().await;
             if let Some(conn) = connections.get_mut(addr)
-                && !conn.am_choking && conn.can_queue_upload() {
-                    conn.pending_uploads.push_back(piece_request);
+                && !conn.am_choking
+                && conn.can_queue_upload()
+            {
+                conn.pending_uploads.push_back(piece_request);
+            }
+        }
+        Ok(())
+    }
+
+    /// Dispatch an incoming `Extended` message (BEP-10).
+    ///
+    /// Two sub-cases, distinguished by `message.payload[0]`:
+    ///
+    /// **Handshake (`0`)** — the peer's extension capability announcement.
+    /// Parse the bencode dict (`payload[1..]`) to find `"m" → "ut_metadata"`.
+    /// Store that value in `conn.peer_ut_metadata_id` so you can address
+    /// data/reject responses correctly.
+    ///
+    /// **Metadata request (`OUR_UT_METADATA_ID`)** — the peer is asking for a
+    /// piece of our info dict (BEP-9 `msg_type=0`).
+    /// Call `parse_metadata_request` to get the piece index, then either:
+    ///   - slice the info dict and queue `create_metadata_data_response`, or
+    ///   - queue `create_metadata_reject` if the dict is unavailable.
+    ///
+    async fn handle_extended_message(
+        &self,
+        message: Message,
+        addr: &SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match message.payload.first() {
+            Some(&0) => {
+                let Some(peer_ut_metadata_id) =
+                    metadata::parse_handshake_ut_metadata_id(&message.payload)
+                else {
+                    return Ok(());
+                };
+                let mut connections = self.connections.lock().await;
+                if let Some(conn) = connections.get_mut(addr) {
+                    conn.peer_ut_metadata_id = Some(peer_ut_metadata_id);
                 }
+            }
+            Some(&id) if id == OUR_UT_METADATA_ID => {
+                let Some(piece_index) =
+                    metadata::parse_metadata_request(&message.payload, OUR_UT_METADATA_ID)
+                else {
+                    return Ok(());
+                };
+
+                let mut connections = self.connections.lock().await;
+                if let Some(conn) = connections.get_mut(addr)
+                    && let Some(peer_ut_metadata_id) = conn.peer_ut_metadata_id
+                {
+                    let response = match &self.info_dict {
+                        Some(info_dict) => {
+                            let start = piece_index as usize * metadata::METADATA_PIECE_SIZE;
+                            if start >= info_dict.len() {
+                                metadata::create_metadata_reject(peer_ut_metadata_id, piece_index)
+                            } else {
+                                let end =
+                                    (start + metadata::METADATA_PIECE_SIZE).min(info_dict.len());
+                                metadata::create_metadata_data_response(
+                                    peer_ut_metadata_id,
+                                    piece_index,
+                                    &info_dict[start..end],
+                                    info_dict.len(),
+                                )
+                            }
+                        }
+                        None => metadata::create_metadata_reject(peer_ut_metadata_id, piece_index),
+                    };
+                    conn.pending_metadata_responses.push_back(response);
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -886,6 +981,31 @@ impl BitTorrentClient {
 
         Ok(())
     }
+
+    async fn flush_metadata_queue(
+        &self,
+        addr: &SocketAddr,
+        write_half: &mut OwnedWriteHalf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut to_serve = Vec::new();
+        {
+            let mut connections = self.connections.lock().await;
+            if let Some(conn) = connections.get_mut(addr) {
+                while let Some(req) = conn.pending_metadata_responses.pop_front() {
+                    to_serve.push(req);
+                }
+            }
+        }
+        if to_serve.is_empty() {
+            return Ok(());
+        }
+
+        for req in to_serve {
+            write_half.write_all(&req.serialize()).await?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Reads a single BitTorrent message from the read half of a peer connection.
@@ -931,6 +1051,7 @@ impl Clone for BitTorrentClient {
             connections: Arc::clone(&self.connections),
             pipeline_stats: Arc::clone(&self.pipeline_stats),
             peer_id: self.peer_id,
+            info_dict: self.info_dict.clone(),
         }
     }
 }

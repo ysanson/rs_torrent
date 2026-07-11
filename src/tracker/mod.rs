@@ -1,8 +1,8 @@
 mod http;
 mod udp;
 
-pub use http::{PEER_ID, build_completion_tracker_url, contact_tracker};
 use http::announce_to_tracker as announce_to_http_tracker;
+pub use http::{PEER_ID, build_completion_tracker_url, contact_tracker};
 use udp::announce_to_udp_tracker;
 
 use crate::peer::Peer;
@@ -30,7 +30,11 @@ pub async fn announce_to_tracker(
         .await
         {
             Ok((interval, peers)) => {
-                println!("✅ UDP tracker response: {} peers, interval: {}s", peers.len(), interval);
+                println!(
+                    "✅ UDP tracker response: {} peers, interval: {}s",
+                    peers.len(),
+                    interval
+                );
                 return Ok((interval as i64, peers));
             }
             Err(e) => {
@@ -39,7 +43,7 @@ pub async fn announce_to_tracker(
             }
         }
     }
-    
+
     // HTTP/HTTPS tracker
     println!("📡 Using HTTP tracker: {}", announce_url);
     announce_to_http_tracker(announce_url, infohash, length, port).await

@@ -209,8 +209,7 @@ pub fn is_valid_torrent(file_path: &str) -> bool {
 pub fn get_torrent_stats(file_path: &str) -> Result<TorrentStats, Box<dyn std::error::Error>> {
     let torrent = parse_torrent_file(file_path)?;
 
-    let estimated_pieces =
-        torrent.total_size.div_ceil(torrent.piece_length as u64);
+    let estimated_pieces = torrent.total_size.div_ceil(torrent.piece_length as u64);
     let download_time_estimate = estimate_download_time(torrent.total_size);
 
     Ok(TorrentStats {

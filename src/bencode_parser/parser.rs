@@ -25,6 +25,7 @@ pub enum Value<'a> {
     Dictionary {
         entries: FxHashMap<&'a [u8], Self>,
         hash: [u8; 20],
+        raw: &'a [u8],
     },
 }
 
@@ -122,7 +123,14 @@ impl<'a> Value<'a> {
         let raw_slice = &input[..parsed_len];
         let hash: [u8; 20] = Sha1::digest(raw_slice).into();
 
-        Ok((inp, Value::Dictionary { entries, hash }))
+        Ok((
+            inp,
+            Value::Dictionary {
+                entries,
+                hash,
+                raw: raw_slice,
+            },
+        ))
     }
 }
 
@@ -134,6 +142,7 @@ pub enum ValueOwned {
     Dictionary {
         entries: FxHashMap<Vec<u8>, Self>,
         hash: [u8; 20],
+        raw: Vec<u8>,
     },
 }
 
@@ -143,7 +152,7 @@ impl<'a> From<Value<'a>> for ValueOwned {
             Value::Bytes(b) => ValueOwned::Bytes(b.to_vec()),
             Value::Integer(i) => ValueOwned::Integer(i),
             Value::List(lst) => ValueOwned::List(lst.into_iter().map(ValueOwned::from).collect()),
-            Value::Dictionary { entries, hash } => {
+            Value::Dictionary { entries, hash, raw } => {
                 let owned_entries = entries
                     .into_iter()
                     .map(|(k, v)| (k.to_vec(), ValueOwned::from(v)))
@@ -151,6 +160,7 @@ impl<'a> From<Value<'a>> for ValueOwned {
                 ValueOwned::Dictionary {
                     entries: owned_entries,
                     hash,
+                    raw: raw.to_vec(),
                 }
             }
         }
@@ -283,15 +293,9 @@ mod tests {
     #[test]
     fn test_dict() {
         let (_, v) = Value::parse_dict(b"d3:cow3:moo4:spam4:eggse").unwrap();
-        assert_matches!(
-            v,
-            Value::Dictionary {
-                entries: _,
-                hash: _
-            }
-        );
+        assert_matches!(v, Value::Dictionary { .. });
 
-        if let Value::Dictionary { entries, hash: _ } = v {
+        if let Value::Dictionary { entries, .. } = v {
             let v = entries.get(b"cow".as_slice()).unwrap();
             assert_matches!(*v, Value::Bytes(b"moo"));
 
@@ -300,15 +304,9 @@ mod tests {
         }
 
         let (_, v) = Value::parse_dict(b"d4:spaml1:a1:bee").unwrap();
-        assert_matches!(
-            v,
-            Value::Dictionary {
-                entries: _,
-                hash: _
-            }
-        );
+        assert_matches!(v, Value::Dictionary { .. });
 
-        if let Value::Dictionary { entries, hash: _ } = v {
+        if let Value::Dictionary { entries, .. } = v {
             let v = entries.get(b"spam".as_slice()).unwrap();
             assert_matches!(*v, Value::List(_));
         }
@@ -318,19 +316,9 @@ mod tests {
     fn test_parse() {
         let data = parse(b"d3:cow3:moo4:spam4:eggse").unwrap();
         let v = data.first().unwrap();
-        assert_matches!(
-            v,
-            Value::Dictionary {
-                entries: _,
-                hash: _
-            }
-        );
+        assert_matches!(v, Value::Dictionary { .. });
 
-        if let Value::Dictionary {
-            entries: dict,
-            hash: _,
-        } = v
-        {
+        if let Value::Dictionary { entries: dict, .. } = v {
             let v = dict.get(b"cow".as_slice()).unwrap();
             assert_matches!(*v, Value::Bytes(b"moo"));
 
@@ -339,19 +327,9 @@ mod tests {
         }
 
         let (_, v) = Value::parse_dict(b"d4:spaml1:a1:bee").unwrap();
-        assert_matches!(
-            v,
-            Value::Dictionary {
-                entries: _,
-                hash: _
-            }
-        );
+        assert_matches!(v, Value::Dictionary { .. });
 
-        if let Value::Dictionary {
-            entries: dict,
-            hash: _,
-        } = v
-        {
+        if let Value::Dictionary { entries: dict, .. } = v {
             let v = dict.get(b"spam".as_slice()).unwrap();
             assert_matches!(*v, Value::List(_));
         }
@@ -405,27 +383,11 @@ mod tests {
         assert_eq!(data.len(), 1);
 
         let v = data.first().unwrap();
-        assert_matches!(
-            *v,
-            Value::Dictionary {
-                entries: _,
-                hash: _
-            }
-        );
+        assert_matches!(*v, Value::Dictionary { .. });
 
-        if let Value::Dictionary {
-            entries: dict,
-            hash: _,
-        } = v
-        {
+        if let Value::Dictionary { entries: dict, .. } = v {
             let info = dict.get(b"info".as_slice()).unwrap();
-            assert_matches!(
-                *info,
-                Value::Dictionary {
-                    entries: _,
-                    hash: _
-                }
-            );
+            assert_matches!(*info, Value::Dictionary { .. });
 
             let announce = dict.get(b"announce".as_slice()).unwrap();
             assert_matches!(*announce, Value::Bytes(_));
@@ -447,27 +409,11 @@ mod tests {
         assert_eq!(data.len(), 1);
 
         let v = data.first().unwrap();
-        assert_matches!(
-            *v,
-            Value::Dictionary {
-                entries: _,
-                hash: _
-            }
-        );
+        assert_matches!(*v, Value::Dictionary { .. });
 
-        if let Value::Dictionary {
-            entries: dict,
-            hash: _,
-        } = v
-        {
+        if let Value::Dictionary { entries: dict, .. } = v {
             let info = dict.get(b"info".as_slice()).unwrap();
-            assert_matches!(
-                *info,
-                Value::Dictionary {
-                    entries: _,
-                    hash: _
-                }
-            );
+            assert_matches!(*info, Value::Dictionary { .. });
 
             let announce = dict.get(b"announce".as_slice()).unwrap();
             assert_matches!(*announce, Value::Bytes(_));

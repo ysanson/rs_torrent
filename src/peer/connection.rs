@@ -1,9 +1,9 @@
+use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::time::Duration;
-use rustc_hash::FxHashMap;
 
 use crate::peer::Peer;
-use crate::peer::message::{Bitfield, PieceRequest};
+use crate::peer::message::{Bitfield, Message, PieceRequest};
 use crate::peer::state::BlockInfo;
 
 pub(super) const MAX_PIPELINE_DEPTH: usize = 10;
@@ -22,6 +22,11 @@ pub struct PeerConnection {
     pub pending_requests: FxHashMap<BlockInfo, std::time::Instant>, // Blocks we've requested with timestamps
     pub last_request_time: Option<std::time::Instant>,
     pub pending_uploads: VecDeque<PieceRequest>,
+    /// The ut_metadata extension ID the *peer* assigned in their extension handshake.
+    /// Populated when we receive and parse the peer's `Extended` handshake (msg ID 0).
+    /// Required to address metadata data/reject responses back to the peer.
+    pub peer_ut_metadata_id: Option<u8>,
+    pub pending_metadata_responses: VecDeque<Message>,
 }
 
 impl PeerConnection {
@@ -36,6 +41,8 @@ impl PeerConnection {
             pending_requests: FxHashMap::default(),
             last_request_time: None,
             pending_uploads: VecDeque::new(),
+            peer_ut_metadata_id: None,
+            pending_metadata_responses: VecDeque::new(),
         }
     }
 

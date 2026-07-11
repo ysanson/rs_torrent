@@ -19,5 +19,5 @@ pub struct Peer {
 }
 
 pub use client::{BitTorrentClient, PIECE_BLOCK_SIZE};
-pub use state::DownloadState;
 pub use metadata::fetch_metadata_from_peers;
+pub use state::DownloadState;
