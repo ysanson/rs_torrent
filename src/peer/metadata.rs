@@ -119,7 +119,7 @@ async fn fetch_metadata_from_peer(
     debug!("✅ Handshake successful, peer supports extensions");
 
     // Send extended handshake immediately after initial handshake
-    let ext_handshake = create_extension_handshake();
+    let ext_handshake = create_extension_handshake(None);
     stream.write_all(&ext_handshake.serialize()).await?;
     debug!("📤 Sent extension handshake");
 
@@ -250,15 +250,23 @@ async fn fetch_metadata_from_peer(
     }
 }
 
-/// Create an extension handshake message
-pub fn create_extension_handshake() -> Message {
-    // Create bencode dictionary: d1:md11:ut_metadatai1eee
-    // This means: {"m": {"ut_metadata": 1}}
-    let payload = b"d1:md11:ut_metadatai1eee";
+/// Create an extension handshake message advertising our `ut_metadata` ID.
+///
+/// When `metadata_size` is known (i.e. we already have the full info dict),
+/// it's included so the peer can size its download upfront, per BEP-9.
+pub fn create_extension_handshake(metadata_size: Option<usize>) -> Message {
+    // {"m": {"ut_metadata": OUR_UT_METADATA_ID}}, plus "metadata_size" when known.
+    let bencode = match metadata_size {
+        Some(size) => format!(
+            "d1:md11:ut_metadatai{}ee13:metadata_sizei{}ee",
+            OUR_UT_METADATA_ID, size
+        ),
+        None => format!("d1:md11:ut_metadatai{}ee", OUR_UT_METADATA_ID),
+    };
 
     let mut full_payload = Vec::new();
     full_payload.push(ExtendedMessageId::Handshake as u8);
-    full_payload.extend_from_slice(payload);
+    full_payload.extend_from_slice(bencode.as_bytes());
 
     Message {
         kind: MessageId::Extended,

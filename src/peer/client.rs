@@ -51,7 +51,7 @@ impl BitTorrentClient {
     pub async fn connect_to_peer(
         &self,
         peer: &Peer,
-    ) -> Result<TcpStream, Box<dyn std::error::Error>> {
+    ) -> Result<(TcpStream, bool), Box<dyn std::error::Error>> {
         let addr = SocketAddr::from((peer.ip_addr, peer.port));
         let stream = timeout(CONNECTION_TIMEOUT, TcpStream::connect(addr)).await??;
 
@@ -66,14 +66,19 @@ impl BitTorrentClient {
         self.perform_handshake(stream, handshake).await
     }
 
-    /// Perform the BitTorrent handshake with a peer
+    /// Perform the BitTorrent handshake with a peer.
+    ///
+    /// Returns the connected stream along with whether the peer advertised
+    /// support for the extension protocol (BEP-10), which callers need to
+    /// know before sending an `Extended` (e.g. `ut_metadata`) handshake.
     async fn perform_handshake(
         &self,
         mut stream: TcpStream,
         handshake: Handshake,
-    ) -> Result<TcpStream, Box<dyn std::error::Error>> {
-        // Send our handshake
-        let handshake_bytes = handshake.serialize();
+    ) -> Result<(TcpStream, bool), Box<dyn std::error::Error>> {
+        // Send our handshake, advertising extension protocol support.
+        let mut handshake_bytes = handshake.serialize();
+        handshake_bytes[25] |= 0x10;
         stream.write_all(&handshake_bytes).await?;
 
         // Receive peer's handshake
@@ -88,13 +93,15 @@ impl BitTorrentClient {
             return Err("Infohash mismatch".into());
         }
 
+        let peer_supports_extensions = response[25] & 0x10 != 0;
+
         debug!("✅ Handshake successful with peer - infohash matches");
-        Ok(stream)
+        Ok((stream, peer_supports_extensions))
     }
 
     /// Main peer worker that handles communication with a single peer
     pub async fn peer_worker(&self, peer: Peer) -> Result<(), Box<dyn std::error::Error>> {
-        let mut stream = self.connect_to_peer(&peer).await?;
+        let (mut stream, peer_supports_extensions) = self.connect_to_peer(&peer).await?;
         let addr = SocketAddr::from((peer.ip_addr, peer.port));
         stream
             .write_all(&metadata::create_extension_handshake().serialize())
@@ -121,6 +128,13 @@ impl BitTorrentClient {
         };
         stream.write_all(&unchoke_msg.serialize()).await?;
         debug!("📤 Sent 'unchoke' to peer {addr}");
+
+        if peer_supports_extensions {
+            let metadata_size = self.info_dict.as_ref().map(|d| d.len());
+            let ext_handshake = metadata::create_extension_handshake(metadata_size);
+            stream.write_all(&ext_handshake.serialize()).await?;
+            debug!("📤 Sent extension handshake to peer {addr}");
+        }
 
         {
             let mut connections = self.connections.lock().await;
@@ -365,10 +379,6 @@ impl BitTorrentClient {
     ///   - slice the info dict and queue `create_metadata_data_response`, or
     ///   - queue `create_metadata_reject` if the dict is unavailable.
     ///
-    /// Hint: `BitTorrentClient` will need an `info_dict: Option<Arc<Vec<u8>>>`
-    /// field, and `PeerConnection` a `pending_metadata_responses` queue mirroring
-    /// `pending_uploads`, drained by a new `flush_metadata_queue` step in the
-    /// main loop.
     async fn handle_extended_message(
         &self,
         message: Message,
