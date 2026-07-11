@@ -103,9 +103,6 @@ impl BitTorrentClient {
     pub async fn peer_worker(&self, peer: Peer) -> Result<(), Box<dyn std::error::Error>> {
         let (mut stream, peer_supports_extensions) = self.connect_to_peer(&peer).await?;
         let addr = SocketAddr::from((peer.ip_addr, peer.port));
-        stream
-            .write_all(&metadata::create_extension_handshake().serialize())
-            .await?;
         debug!("🔗 Connected to peer {addr}");
 
         // Initialize connection state
