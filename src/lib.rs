@@ -39,7 +39,11 @@ pub async fn download_from_torrent_file(
         torrent.pieces.clone(),
         torrent.total_size,
     );
-    let client = BitTorrentClient::new(download_state, PEER_ID, Some(Arc::new(torrent.raw_info_dict.clone())));
+    let client = BitTorrentClient::new(
+        download_state,
+        PEER_ID,
+        Some(Arc::new(torrent.raw_info_dict.clone())),
+    );
     let (reannounce_interval, initial_peers) = announce_to_tracker(
         &torrent.announce,
         &torrent.infohash,
@@ -363,8 +367,7 @@ mod tests {
         let data = b"d3:cow3:moo4:spam4:eggse";
         let parsed = parse(data).unwrap();
 
-        if let Some(Value::Dictionary { entries: dict, .. }) = parsed.first()
-        {
+        if let Some(Value::Dictionary { entries: dict, .. }) = parsed.first() {
             if let Some(Value::Bytes(cow_value)) = dict.get(b"cow" as &[u8]) {
                 assert_eq!(cow_value, b"moo");
             }
@@ -380,8 +383,7 @@ mod tests {
         let data = b"d3:cow3:moo4:spam4:eggse";
         let parsed = parse_owned(data).unwrap();
 
-        if let Some(ValueOwned::Dictionary { entries: dict, .. }) = parsed.first()
-        {
+        if let Some(ValueOwned::Dictionary { entries: dict, .. }) = parsed.first() {
             if let Some(ValueOwned::Bytes(cow_value)) = dict.get(b"cow" as &[u8]) {
                 assert_eq!(cow_value, b"moo");
             }

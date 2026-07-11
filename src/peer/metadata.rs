@@ -12,11 +12,11 @@ use tokio::time::timeout;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-pub const METADATA_PIECE_SIZE: usize = 16384; // 16 KiB per piece
+pub(crate) const METADATA_PIECE_SIZE: usize = 16384; // 16 KiB per piece
 const MAX_RETRIES: usize = 3;
 // The local ID we advertise for ut_metadata in our extension handshake.
 // Peers use this ID as payload[0] when sending metadata pieces back to us.
-pub const OUR_UT_METADATA_ID: u8 = 1;
+pub(crate) const OUR_UT_METADATA_ID: u8 = 1;
 
 /// Represents the metadata extension handshake information
 #[derive(Debug, Clone)]
@@ -454,6 +454,32 @@ async fn receive_message_with_retry(
 /// Returns the requested piece index `N` if the message is a valid `msg_type=0`
 /// request and the leading ID byte matches.  Returns `None` for anything else
 /// (wrong ID, wrong msg_type, malformed bencode).
+/// Parse a BEP-10 extension handshake payload and return the peer's advertised
+/// `ut_metadata` ID from its `m` dictionary.
+///
+/// Unlike `receive_extension_handshake`, `metadata_size` is treated as optional:
+/// a peer that doesn't have the metadata yet omits it from its handshake.
+pub fn parse_handshake_ut_metadata_id(payload: &[u8]) -> Option<u8> {
+    if payload.first() != Some(&(ExtendedMessageId::Handshake as u8)) {
+        return None;
+    }
+    let bencode_data = &payload[1..];
+    let parsed = parse_owned(bencode_data).ok()?;
+    let ValueOwned::Dictionary { entries, .. } = parsed.first()? else {
+        return None;
+    };
+    let ValueOwned::Dictionary {
+        entries: m_dict, ..
+    } = entries.get(b"m" as &[u8])?
+    else {
+        return None;
+    };
+    match m_dict.get(b"ut_metadata" as &[u8]) {
+        Some(ValueOwned::Integer(n)) => Some(*n as u8),
+        _ => None,
+    }
+}
+
 pub fn parse_metadata_request(payload: &[u8], expected_ut_metadata: u8) -> Option<u32> {
     if payload.is_empty() {
         return None;
@@ -500,12 +526,11 @@ pub fn create_metadata_data_response(
         "d8:msg_typei1e5:piecei{}e10:total_sizei{}ee",
         piece_index, total_size
     );
-    let payload = [
-        [peer_ut_metadata_id].as_ref(),
-        bencode.as_bytes(),
-        piece_data,
-    ]
-    .concat();
+    let mut payload = Vec::with_capacity(1 + bencode.len() + piece_data.len());
+    payload.push(peer_ut_metadata_id);
+    payload.extend_from_slice(bencode.as_bytes());
+    payload.extend_from_slice(piece_data);
+
     Message {
         kind: MessageId::Extended,
         payload,
@@ -523,29 +548,16 @@ pub fn create_metadata_data_response(
 /// Send this when you cannot serve the requested piece (info dict not yet
 /// available, or piece index is out of range).
 pub fn create_metadata_reject(peer_ut_metadata_id: u8, piece_index: u32) -> Message {
-    let bencode = format!("d8:msg_typei2e5:piecei{}ee", piece_index);
-    let payload = [[peer_ut_metadata_id].as_ref(), bencode.as_bytes()].concat();
+    let bencode = format!("d8:msg_typei2e5:piecei{}ee", piece_index,);
+
+    let mut payload = Vec::with_capacity(1 + bencode.len());
+    payload.push(peer_ut_metadata_id);
+    payload.extend_from_slice(bencode.as_bytes());
+
     Message {
         kind: MessageId::Extended,
         payload,
     }
-}
-
-pub fn parse_handshake_ut_id(payload: &[u8]) -> Option<u8> {
-    let parsed = parse_owned(&payload[1..]).ok()?;
-    let ValueOwned::Dictionary { entries, .. } = parsed.into_iter().next()? else {
-        return None;
-    };
-    let ValueOwned::Dictionary {
-        entries: m_dict, ..
-    } = entries.get(b"m" as &[u8])?
-    else {
-        return None;
-    };
-    let ValueOwned::Integer(n) = m_dict.get(b"ut_metadata" as &[u8])? else {
-        return None;
-    };
-    Some(*n as u8)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────

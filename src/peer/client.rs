@@ -1,6 +1,6 @@
 use crate::peer::handshake::Handshake;
-use crate::peer::message::{Bitfield, Message, MessageId, PieceRequest};
-use crate::peer::message::{ExtendedMessageId, build_piece_response};
+use crate::peer::message::{Bitfield, Message, MessageId, PieceRequest, build_piece_response};
+use crate::peer::metadata::OUR_UT_METADATA_ID;
 use crate::peer::state::{BlockInfo, DownloadState};
 use crate::peer::{Peer, metadata};
 
@@ -374,61 +374,53 @@ impl BitTorrentClient {
         message: Message,
         addr: &SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        match ExtendedMessageId::try_from(message.payload.first().copied().unwrap_or(255)) {
-            Ok(ExtendedMessageId::Handshake) => {
-                if let Some(ut_id) = metadata::parse_handshake_ut_id(&message.payload) {
-                    let mut connections = self.connections.lock().await;
-                    if let Some(conn) = connections.get_mut(addr) {
-                        conn.peer_ut_metadata_id = Some(ut_id);
-                        Ok(())
-                    } else {
-                        Err("No connection found for handshake".into())
-                    }
-                } else {
-                    Err("ut_metadata not found in handshake".into())
-                }
-            }
-            Ok(ExtendedMessageId::Metadata) => {
-                let Some(piece_index) = metadata::parse_metadata_request(
-                    &message.payload,
-                    metadata::OUR_UT_METADATA_ID,
-                ) else {
+        match message.payload.first() {
+            Some(&0) => {
+                let Some(peer_ut_metadata_id) =
+                    metadata::parse_handshake_ut_metadata_id(&message.payload)
+                else {
                     return Ok(());
-                };
-                let (_peer_ut_id, response) = {
-                    let connections = self.connections.lock().await;
-                    let conn = connections.get(addr).ok_or("Unknown peer")?;
-                    let peer_ut_id = conn.peer_ut_metadata_id.unwrap_or(1);
-                    let response = if let Some(ref info_dict) = self.info_dict {
-                        let start = piece_index as usize * 16384;
-                        if start >= info_dict.len() {
-                            metadata::create_metadata_reject(peer_ut_id, piece_index)
-                        } else {
-                            let end = (start + metadata::METADATA_PIECE_SIZE).min(info_dict.len());
-                            metadata::create_metadata_data_response(
-                                peer_ut_id,
-                                piece_index,
-                                &info_dict[start..end],
-                                info_dict.len(),
-                            )
-                        }
-                    } else {
-                        metadata::create_metadata_reject(peer_ut_id, piece_index)
-                    };
-                    (peer_ut_id, response)
                 };
                 let mut connections = self.connections.lock().await;
                 if let Some(conn) = connections.get_mut(addr) {
-                    conn.pending_metadata_responses.push_back(response);
-                    Ok(())
-                } else {
-                    Err("Unknown peer".into())
+                    conn.peer_ut_metadata_id = Some(peer_ut_metadata_id);
                 }
             }
-            _ => {
-                Err("Unknown extended message".into())
+            Some(&id) if id == OUR_UT_METADATA_ID => {
+                let Some(piece_index) =
+                    metadata::parse_metadata_request(&message.payload, OUR_UT_METADATA_ID)
+                else {
+                    return Ok(());
+                };
+
+                let mut connections = self.connections.lock().await;
+                if let Some(conn) = connections.get_mut(addr)
+                    && let Some(peer_ut_metadata_id) = conn.peer_ut_metadata_id
+                {
+                    let response = match &self.info_dict {
+                        Some(info_dict) => {
+                            let start = piece_index as usize * metadata::METADATA_PIECE_SIZE;
+                            if start >= info_dict.len() {
+                                metadata::create_metadata_reject(peer_ut_metadata_id, piece_index)
+                            } else {
+                                let end =
+                                    (start + metadata::METADATA_PIECE_SIZE).min(info_dict.len());
+                                metadata::create_metadata_data_response(
+                                    peer_ut_metadata_id,
+                                    piece_index,
+                                    &info_dict[start..end],
+                                    info_dict.len(),
+                                )
+                            }
+                        }
+                        None => metadata::create_metadata_reject(peer_ut_metadata_id, piece_index),
+                    };
+                    conn.pending_metadata_responses.push_back(response);
+                }
             }
+            _ => {}
         }
+        Ok(())
     }
 
     /// Handle a piece message from a peer

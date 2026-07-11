@@ -1,5 +1,5 @@
-use std::net::SocketAddr;
 use rustc_hash::FxHashMap;
+use std::net::SocketAddr;
 
 use super::connection::PeerConnection;
 

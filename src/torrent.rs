@@ -218,10 +218,14 @@ pub fn parse_magnet_link(magnet: &str) -> Result<Magnet, Box<dyn std::error::Err
         }
     }
 
-    let infohash =
-        infohash.ok_or("Missing 'xt' parameter or invalid infohash format")?;
+    let infohash = infohash.ok_or("Missing 'xt' parameter or invalid infohash format")?;
 
-    Ok(Magnet { infohash, display_name, trackers, file_size })
+    Ok(Magnet {
+        infohash,
+        display_name,
+        trackers,
+        file_size,
+    })
 }
 
 #[cfg(test)]
